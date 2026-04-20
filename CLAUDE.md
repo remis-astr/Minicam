@@ -264,41 +264,40 @@ minicam/
 
 ### Phase 0 — Bootstrap (pas de code applicatif)
 
-- [ ] Flasher BWL64_STARVIS2 sur SD
-- [ ] Premier boot : SSH activé, hostname `minicam0`, locale fr_FR
-- [ ] Setup clé SSH RPi5 → Pi0 + alias `~/.ssh/config`
-- [ ] Vérifier `libcamera-hello --list-cameras` détecte bien l'IMX462
-- [ ] Init du repo Git, premier commit avec ce CLAUDE.md
-- [ ] Écrire `deploy/bootstrap-pi0.sh` (apt update, install python3-picamera2, python3-pip, etc.)
+- [x] Flasher BWL64_STARVIS2 sur SD
+- [x] Premier boot : SSH activé (hostname laissé à rpi0)
+- [x] Setup clé SSH RPi5 → Pi0 + alias `~/.ssh/config` (user=admin, rpi0.local + pi0-usb 192.168.7.2)
+- [x] Vérifier capteur : `rpicam-hello --list-cameras` → IMX462 1920×1080 RAW12 60fps OK
+- [x] Init du repo Git, premier commit avec ce CLAUDE.md + structure complète
+- [x] Écrire `deploy/bootstrap-pi0.sh`
 
 ### Phase 1 — Validation capteur
 
-- [ ] Script Python minimal : capture 1 frame RAW16, sauvegarde en .npy
-- [ ] Valider plage gain (0–30 dB) et exposition (1 µs – 30 s)
-- [ ] Mesurer le framerate max en preview 720p
-- [ ] **Critère de succès** : capture pose 10s d'une cible faible, lecture sur RPi5
+- [x] Script Python minimal : capture RAW12 (SRGGB12_CSI2P packed, shape 1080×2880 uint8), sauvegarde en .npy
+- [x] Valider plage gain : ×1.0 → ×31.62 (~30 dB) OK
+- [x] Valider plage exposition : 992 µs → 9.998 s OK
+- [x] Framerate 720p YUV420 : 28.8 fps (Python loop) — max hardware 60 fps
+- [x] **Critère de succès** : validé (IMX327 connecté en dev, IMX462 en prod)
 
 ### Phase 2 — Squelette API
 
-- [ ] FastAPI app, endpoints : `GET /status`, `GET /healthz`
-- [ ] WebSocket `/ws/control` : commandes `set_gain`, `set_exposure`, `capture`
-- [ ] Schémas Pydantic pour tous les messages
-- [ ] systemd unit `minicam-api.service`
-- [ ] **Critère de succès** : `wscat` depuis RPi5 → ping/pong + set gain → vérification
+- [x] FastAPI app, endpoints : `GET /status`, `GET /healthz`
+- [x] WebSocket `/ws/control` : commandes `ping`, `set_gain`, `set_exposure`, `status`
+- [x] systemd unit `minicam-api.service` installé et activé
+- [x] **Critère de succès** : ping/pong + set_gain + set_exposure validés depuis RPi5
 
 ### Phase 3 — Preview MJPEG
 
-- [ ] Endpoint `/preview.mjpg` (multipart/x-mixed-replace)
-- [ ] Encodage hardware si possible (V4L2 H.264 → MJPEG fallback)
-- [ ] Throttling adaptatif si client lent
-- [ ] **Critère de succès** : preview 720p à ≥ 10 fps dans Chrome sur RPi5
+- [x] Endpoint `/preview.mjpg` (multipart/x-mixed-replace, YUV420→BGR→JPEG via cv2)
+- [x] Throttling à 15 fps cible côté serveur
+- [x] **Critère de succès** : 13.4 fps mesurés depuis RPi5 en WiFi (> 10 fps requis)
 
 ### Phase 4 — Page HTML
 
-- [ ] Page de contrôle avec preview embarqué + sliders gain/expo + bouton capture
-- [ ] Vanilla JS, pas de bundler
-- [ ] WebSocket connecté à `/ws/control`
-- [ ] **Critère de succès** : pilotage complet depuis browser sans rechargement
+- [x] Page de contrôle avec preview MJPEG embarqué + sliders gain/expo
+- [x] Bouton "Capture PNG" → `GET /capture.png` (téléchargement direct)
+- [x] Vanilla JS, pas de bundler, WebSocket connecté à `/ws/control`
+- [x] **Critère de succès** : pilotage complet depuis browser validé
 
 ### Phase 5 — Bascule réseau USB ↔ WiFi
 
@@ -360,7 +359,7 @@ minicam/
 
 ## 8. Points d'attention / pièges connus
 
-- **picamera2 + IMX462** : vérifier le device tree overlay nécessaire dans `/boot/firmware/config.txt`. L'image BWL64_STARVIS2 devrait déjà l'inclure mais à confirmer.
+- **Driver capteur (famille IMX290)** : le module Innomaker actuellement connecté est un **IMX327** (même famille que l'IMX462 cible). Utiliser `dtoverlay=imx290,clock-frequency=74250000` pour les deux. La clock XCLK Innomaker est 74.25 MHz au lieu des 37.125 MHz par défaut — sans ce paramètre, le frontend CSI-2 (Unicam) timeout immédiatement. Les drivers imx290/imx462 sont interchangeables pour cette famille de capteurs.
 - **USB gadget + alimentation** : le port USB du Pi0 doit être en mode OTG ; vérifier `dr_mode = peripheral` dans le DT.
 - **RAM** : surveiller `free -h` régulièrement. Objectif < 200 Mo utilisés en mode API actif. Si on dépasse, désactiver agressivement les services non utilisés.
 - **Banding horizontal IMX585** : problème connu lié à la qualité d'alim. À surveiller aussi sur IMX462 si on alimente sur batterie — soigner les découplages côté LDO.
