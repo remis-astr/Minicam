@@ -301,11 +301,11 @@ minicam/
 
 ### Phase 5 — Bascule réseau USB ↔ WiFi
 
-- [ ] Configuration `libcomposite` pour USB gadget (RNDIS + ECM pour cross-platform)
-- [ ] Service `minicam-net-usb.service` qui monte `usb0` à 192.168.7.2/24
-- [ ] Service `minicam-net-wifi.service` (client mode pour commencer, AP plus tard)
-- [ ] Script de bascule atomique (stop l'un, start l'autre)
-- [ ] **Critère de succès** : bascule USB → WiFi sans reboot, API reste joignable sur la nouvelle interface
+- [x] `dtoverlay=dwc2` + `modules-load=dwc2,libcomposite` dans boot config
+- [x] `usb_gadget.py` : configuration ECM via libcomposite/ConfigFS
+- [x] `minicam-net-usb.service` : usb0 @ 192.168.7.2/24 (NO-CARRIER tant que câble débranché)
+- [x] `minicam-net-wifi.service` : WiFi via NetworkManager
+- [ ] **Critère de succès** : bascule USB → WiFi sans reboot (à valider avec câble USB branché)
 
 ### Phase 6 — UI : OLED + boutons GPIO + state machine
 

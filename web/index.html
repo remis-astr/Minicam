@@ -13,8 +13,9 @@
 </header>
 
 <main>
-  <section class="preview-box">
+  <section class="preview-box" id="preview-box">
     <img id="preview" src="/preview.mjpg" alt="Preview" onerror="this.src=''">
+    <button id="btn-fullscreen" class="fullscreen-btn" title="Plein écran">⛶</button>
   </section>
 
   <section class="controls">
@@ -28,8 +29,24 @@
       <input type="range" id="expo-slider" min="0.1" max="10000" step="0.1" disabled>
     </div>
 
+    <div class="control-row">
+      <label for="wb-red-slider">Rouge <span id="wb-red-val">—</span></label>
+      <input type="range" id="wb-red-slider" min="0.1" max="8" step="0.05" disabled>
+    </div>
+
+    <div class="control-row">
+      <label for="wb-blue-slider">Bleu <span id="wb-blue-val">—</span></label>
+      <input type="range" id="wb-blue-slider" min="0.1" max="8" step="0.05" disabled>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="res-select">Résolution</label>
+      <select id="res-select" disabled></select>
+    </div>
+
     <div class="button-row">
-      <a id="btn-capture-png" class="btn" href="/capture.png" download="capture.png">Capture PNG</a>
+      <a class="btn" href="/capture.png" download="capture.png">Capture PNG</a>
+      <a class="btn btn-raw" href="/capture.npy" download="capture_raw.npy">Capture RAW</a>
       <button id="btn-reconnect">Reconnecter</button>
     </div>
 

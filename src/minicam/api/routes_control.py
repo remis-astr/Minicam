@@ -35,6 +35,15 @@ def _handle(camera: Any, msg: dict[str, Any]) -> dict[str, Any]:
     if cmd == "set_exposure":
         camera.set_exposure_ms(float(msg["value_ms"]))
         return {"cmd": "ack", "exposure_us": camera.exposure_us}
+    if cmd == "set_wb":
+        camera.set_wb(float(msg["red"]), float(msg["blue"]))
+        return {"cmd": "ack", "wb_red": camera.wb_red, "wb_blue": camera.wb_blue}
+    if cmd == "set_resolution":
+        try:
+            camera.set_resolution(str(msg["value"]))
+        except ValueError as e:
+            return {"cmd": "error", "detail": str(e)}
+        return {"cmd": "ack", "resolution": camera.resolution}
     if cmd == "status":
         return {"cmd": "status", **camera.status()}
     return {"cmd": "error", "detail": f"unknown command: {cmd}"}
