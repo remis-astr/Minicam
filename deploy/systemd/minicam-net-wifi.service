@@ -1,0 +1,13 @@
+[Unit]
+Description=minicam réseau WiFi (client)
+After=NetworkManager.service
+Conflicts=minicam-net-usb.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nmcli radio wifi on
+ExecStop=/usr/bin/nmcli radio wifi off
+
+[Install]
+WantedBy=multi-user.target

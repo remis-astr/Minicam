@@ -1,0 +1,11 @@
+Host pi0
+    HostName rpi0.local
+    User admin
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host pi0-usb
+    HostName 192.168.7.2
+    User admin
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new

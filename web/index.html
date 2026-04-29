@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniCam</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>MiniCam</h1>
+  <span id="ws-status" class="badge disconnected">Déconnecté</span>
+</header>
+
+<main>
+  <section class="preview-box" id="preview-box">
+    <canvas id="preview-canvas"></canvas>
+    <canvas id="hist-canvas" class="hist-overlay hidden"></canvas>
+    <button id="btn-histogram" class="overlay-btn" title="Histogramme">▦</button>
+    <button id="btn-fullscreen" class="overlay-btn fullscreen-btn" title="Plein écran">⛶</button>
+  </section>
+
+  <section class="controls">
+    <div class="control-row control-row--inline">
+      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
+      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" disabled>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
+      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" disabled>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="wb-red-input">Rouge <span class="input-hint">(0.1 – 8)</span></label>
+      <input type="number" id="wb-red-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="wb-blue-input">Bleu <span class="input-hint">(0.1 – 8)</span></label>
+      <input type="number" id="wb-blue-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="res-select">Résolution</label>
+      <select id="res-select" disabled></select>
+    </div>
+
+    <div class="button-row">
+      <a class="btn" href="/capture.png" download>Capture PNG</a>
+      <a class="btn btn-raw" href="/capture.fits" download>Capture RAW (FITS)</a>
+      <button id="btn-reconnect">Reconnecter</button>
+    </div>
+
+    <div id="status-bar">—</div>
+  </section>
+
+  <section class="scheduler">
+    <h3 class="section-title">Séquence de captures</h3>
+
+    <div class="control-row control-row--inline">
+      <label for="seq-gain">Gain séquence <span class="input-hint">(1 – 64)</span></label>
+      <input type="number" id="seq-gain" class="value-input" min="1" max="64" step="0.5" value="8">
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="seq-expo">Exposition séquence <span class="input-hint">(ms, 0.1 – 10000)</span></label>
+      <input type="number" id="seq-expo" class="value-input" min="0.1" max="10000" step="0.1" value="1000">
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="seq-count">Nombre d'images (max 100)</label>
+      <input type="number" id="seq-count" min="1" max="100" value="10" class="number-input">
+    </div>
+
+    <div class="button-row">
+      <button id="btn-seq-start" disabled>▶ Démarrer</button>
+      <button id="btn-seq-stop" class="hidden">■ Arrêter</button>
+    </div>
+
+    <div class="progress-bar hidden" id="seq-progress-bar">
+      <div class="progress-fill" id="seq-progress-fill"></div>
+      <span class="progress-label" id="seq-progress-label">0 / 0</span>
+    </div>
+
+    <div id="seq-status" class="seq-status">—</div>
+
+    <a id="seq-zip-link" class="btn btn-zip hidden" href="#" download>⬇ Télécharger ZIP</a>
+  </section>
+
+  <section class="indi-section">
+    <h3 class="section-title">Mode INDI</h3>
+    <p class="indi-info">Active INDI pour piloter la caméra depuis Open Live Stacker ou tout client INDI (port 7624). Le preview HTML est suspendu pendant ce mode.</p>
+    <div id="indi-status" class="indi-status">Mode API actif</div>
+    <div class="button-row">
+      <button id="btn-indi-start">▶ Activer INDI</button>
+      <button id="btn-indi-stop" class="hidden">■ Désactiver INDI</button>
+    </div>
+  </section>
+
+  <section class="sys-section">
+    <h3 class="section-title">Système</h3>
+    <div class="button-row">
+      <button id="btn-reboot" class="btn-warning">↺ Redémarrer</button>
+      <button id="btn-shutdown" class="btn-danger">⏻ Éteindre</button>
+    </div>
+    <div id="sys-status" class="sys-status"></div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
