@@ -62,7 +62,7 @@ MiniCam peut être utilisé comme **capteur distant** depuis [RPiCamera2](https:
 - Contrôles (gain, exposition, WB) via WebSocket `/ws/control`
 - Modes supportés : **LiveStack**, **Galaxy**, **Lucky RAW** — pipelines inchangés côté RPiCamera2
 - Transport recommandé : **USB gadget** (480 Mbps, latence < 1 ms, alimentation incluse)
-- **Plate solve + Push-To** : capture RAW → astrometry.net → correction de pointage vers Stellarium
+- **Plate solve + Push-To** : capture RAW → Astap → correction de pointage vers Stellarium
 
 ---
 
