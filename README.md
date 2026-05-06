@@ -54,6 +54,18 @@ deploy/systemd/   # Services systemd
 
 ---
 
+## Intégration RPiCamera2
+
+MiniCam peut être utilisé comme **capteur distant** depuis [RPiCamera2](https://github.com/remis-astr/Rpicamera2---Halide) tournant sur un RPi5 :
+
+- Transport des frames RAW via WebSocket `/ws/raw` (format uint16 LE + metadata JSON)
+- Contrôles (gain, exposition, WB) via WebSocket `/ws/control`
+- Modes supportés : **LiveStack**, **Galaxy**, **Lucky RAW** — pipelines inchangés côté RPiCamera2
+- Transport recommandé : **USB gadget** (480 Mbps, latence < 1 ms, alimentation incluse)
+- **Plate solve + Push-To** : capture RAW → astrometry.net → correction de pointage vers Stellarium
+
+---
+
 ## Déploiement
 
 ```bash
