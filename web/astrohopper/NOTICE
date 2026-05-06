@@ -1,0 +1,32 @@
+This directory contains AstroHopper, modified for integration with MiniCam (RPi0 IMU).
+
+--------------------------------------------------------------------------------
+AstroHopper
+Copyright 2021 Artyom Beilis
+https://github.com/artyom-beilis/skyhopper
+Licensed under the Apache License, Version 2.0
+http://www.apache.org/licenses/LICENSE-2.0
+
+Modifications made for MiniCam integration:
+- imu_shim.js (new): WebSocket client injecting MPU6050 IMU data into AstroHopper
+- astrohopper.html: bug fixes (manual_tr_en, unsupported(), DeviceOrientationEvent
+  guard), service worker disabled, back button added
+- jsdb.js (new): star catalog generated from OpenNGC + western_constellations_atlas_of_space
+
+--------------------------------------------------------------------------------
+Star catalog (jsdb.js)
+Derived from western_constellations_atlas_of_space by Eleanor Lutz
+https://github.com/eleanorlutz/western_constellations_atlas_of_space
+Licensed under the GNU General Public License (GPL)
+
+--------------------------------------------------------------------------------
+VSOP87-Multilang (vsop87a_combined.js)
+Copyright 2021 Greg Miller (gmiller@gregmiller.net)
+http://www.celestialprogramming.com/
+Released as Public Domain
+Updated 2023 by Artyom Beilis
+
+--------------------------------------------------------------------------------
+Service Worker base (sw.js)
+Adopted from AirHorner — Copyright 2015 Google Inc.
+Licensed under the Apache License, Version 2.0
