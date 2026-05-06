@@ -38,13 +38,19 @@ class CameraController:
             display=None,
         )
 
+    def _frame_duration_us(self, exposure_us: int) -> int:
+        """Minimum frame duration to accommodate the requested exposure."""
+        return max(33333, exposure_us)
+
     def open(self) -> None:
         with self._lock:
             self._picam2 = Picamera2()
             self._picam2.configure(self._make_config())
+            fd = self._frame_duration_us(self.exposure_us)
             self._picam2.set_controls({
                 "AnalogueGain": self.gain,
                 "ExposureTime": self.exposure_us,
+                "FrameDurationLimits": (fd, fd),
                 "AeEnable": False,
                 "AwbEnable": False,
                 "ColourGains": (self.wb_red, self.wb_blue),
@@ -76,9 +82,11 @@ class CameraController:
             if self._picam2:
                 self._picam2.stop()
                 self._picam2.configure(self._make_config())
+                fd = self._frame_duration_us(self.exposure_us)
                 self._picam2.set_controls({
                     "AnalogueGain": self.gain,
                     "ExposureTime": self.exposure_us,
+                    "FrameDurationLimits": (fd, fd),
                     "AeEnable": False,
                     "AwbEnable": False,
                     "ColourGains": (self.wb_red, self.wb_blue),
@@ -100,22 +108,132 @@ class CameraController:
         with self._lock:
             self.exposure_us = int(max(0.1, min(30000.0, ms)) * 1000)
             if self._picam2:
-                self._picam2.set_controls({"ExposureTime": self.exposure_us})
+                fd = self._frame_duration_us(self.exposure_us)
+                self._picam2.set_controls({
+                    "ExposureTime": self.exposure_us,
+                    "FrameDurationLimits": (fd, fd),
+                })
         self._persist()
         log.info("Exposure set to %d µs", self.exposure_us)
+
+    def capture_raw_with_settings(self, gain: float, exposure_ms: float) -> Any:
+        """Capture one RAW frame with temporary settings, then restore."""
+        with self._lock:
+            if not self._picam2:
+                raise RuntimeError("Camera not open")
+            p = self._picam2
+            exp_us = int(max(0.1, min(30000.0, exposure_ms)) * 1000)
+            fd = self._frame_duration_us(exp_us)
+            p.set_controls({
+                "AnalogueGain": max(1.0, min(64.0, gain)),
+                "ExposureTime": exp_us,
+                "FrameDurationLimits": (fd, fd),
+            })
+            restore_gain = self.gain
+            restore_exp_us = self.exposure_us
+            restore_fd = self._frame_duration_us(self.exposure_us)
+        # Blocking calls outside the lock so set_gain / set_exposure can proceed
+        p.capture_arrays(["raw"])  # discard — wait for settings
+        arrays, _meta = p.capture_arrays(["raw"])
+        with self._lock:
+            if self._picam2 is p:
+                p.set_controls({
+                    "AnalogueGain": restore_gain,
+                    "ExposureTime": restore_exp_us,
+                    "FrameDurationLimits": (restore_fd, restore_fd),
+                })
+        return arrays[0]
+
+    def capture_frame_with_settings(self, gain: float, exposure_ms: float) -> Any:
+        """Capture one frame with temporary settings, then restore preview settings."""
+        with self._lock:
+            if not self._picam2:
+                raise RuntimeError("Camera not open")
+            p = self._picam2
+            exp_us = int(max(0.1, min(30000.0, exposure_ms)) * 1000)
+            fd = self._frame_duration_us(exp_us)
+            p.set_controls({
+                "AnalogueGain": max(1.0, min(64.0, gain)),
+                "ExposureTime": exp_us,
+                "FrameDurationLimits": (fd, fd),
+            })
+            restore_gain = self.gain
+            restore_exp_us = self.exposure_us
+            restore_fd = self._frame_duration_us(self.exposure_us)
+        # Blocking calls outside the lock
+        p.capture_array("main")  # discard — wait for settings to apply
+        frame = p.capture_array("main")
+        with self._lock:
+            if self._picam2 is p:
+                p.set_controls({
+                    "AnalogueGain": restore_gain,
+                    "ExposureTime": restore_exp_us,
+                    "FrameDurationLimits": (restore_fd, restore_fd),
+                })
+        return frame
+
+    def apply_sequence_settings(self, gain: float, exposure_ms: float) -> None:
+        """Apply capture settings and drain frames until the sensor confirms them."""
+        with self._lock:
+            if not self._picam2:
+                raise RuntimeError("Camera not open")
+            p = self._picam2
+            exp_us = int(max(0.1, min(30000.0, exposure_ms)) * 1000)
+            fd = self._frame_duration_us(exp_us)
+            p.set_controls({
+                "AnalogueGain": max(1.0, min(64.0, gain)),
+                "ExposureTime": exp_us,
+                "FrameDurationLimits": (fd, fd),
+            })
+        # Drain frames outside the lock — IMX290/462 pipeline latency 3-4 frames, cap 8
+        tolerance = max(500, exp_us // 20)  # 5 % tolerance
+        actual = 0
+        for attempt in range(8):
+            _, meta = p.capture_arrays(["raw"])
+            actual = meta.get("ExposureTime", 0)
+            if abs(actual - exp_us) <= tolerance:
+                log.info(
+                    "Sequence settings confirmed after %d discard(s): "
+                    "requested=%d µs actual=%d µs",
+                    attempt + 1, exp_us, actual,
+                )
+                break
+        else:
+            log.warning(
+                "Sequence settings not confirmed after 8 frames "
+                "(requested=%d µs, last actual=%d µs) — proceeding anyway",
+                exp_us, actual,
+            )
+
+    def restore_preview_settings(self) -> None:
+        """Restore persistent preview settings after a sequence."""
+        with self._lock:
+            if not self._picam2:
+                return
+            fd = self._frame_duration_us(self.exposure_us)
+            self._picam2.set_controls({
+                "AnalogueGain": self.gain,
+                "ExposureTime": self.exposure_us,
+                "FrameDurationLimits": (fd, fd),
+            })
+        log.info("Preview settings restored: gain=%.2f exposure_us=%d", self.gain, self.exposure_us)
 
     def capture_raw(self) -> tuple[Any, dict[str, Any]]:
         with self._lock:
             if not self._picam2:
                 raise RuntimeError("Camera not open")
-            arrays, metadata = self._picam2.capture_arrays(["raw"])
-            return arrays[0], metadata
+            p = self._picam2
+        # Release lock before the blocking picamera2 call so set_gain / set_exposure
+        # and the preview loop are never serialised behind a long-exposure wait.
+        arrays, metadata = p.capture_arrays(["raw"])
+        return arrays[0], metadata
 
     def capture_frame(self) -> Any:
         with self._lock:
             if not self._picam2:
                 raise RuntimeError("Camera not open")
-            return self._picam2.capture_array("main")
+            p = self._picam2
+        return p.capture_array("main")
 
     def status(self) -> dict[str, Any]:
         return {

@@ -277,7 +277,7 @@ minicam/
 - [x] Valider plage gain : ×1.0 → ×31.62 (~30 dB) OK
 - [x] Valider plage exposition : 992 µs → 9.998 s OK
 - [x] Framerate 720p YUV420 : 28.8 fps (Python loop) — max hardware 60 fps
-- [x] **Critère de succès** : validé (IMX327 connecté en dev, IMX462 en prod)
+- [x] **Critère de succès** : validé (IMX462 installé, driver `imx462` + tuning `imx462.json`, 74.25 MHz, 60fps)
 
 ### Phase 2 — Squelette API
 
@@ -305,7 +305,9 @@ minicam/
 - [x] `usb_gadget.py` : configuration ECM via libcomposite/ConfigFS
 - [x] `minicam-net-usb.service` : usb0 @ 192.168.7.2/24 (NO-CARRIER tant que câble débranché)
 - [x] `minicam-net-wifi.service` : WiFi via NetworkManager
-- [ ] **Critère de succès** : bascule USB → WiFi sans reboot (à valider avec câble USB branché)
+- **Par défaut (sans boutons)** : WiFi — NetworkManager gère wlan0 automatiquement. minicam-net-usb est désactivé. minicam-api écoute sur 0.0.0.0 donc actif sur toute interface disponible.
+- [x] **Critère de succès** : USB validé — ping 0.35 ms, API et SSH opérationnels sur 192.168.7.2
+- RPi5 : connexion NM `minicam-usb` persistante (192.168.7.1/24, autoconnect)
 
 ### Phase 6 — UI : OLED + boutons GPIO + state machine
 
@@ -335,10 +337,11 @@ minicam/
 
 ### Phase 7 — Mode INDI
 
-- [ ] Install `indi_pylibcamera` + `indiserver`
-- [ ] Service `minicam-indi.service` avec `Conflicts=minicam-api.service`
-- [ ] Test depuis Open Live Stacker (smartphone) en WiFi
-- [ ] **Critère de succès** : connexion OLS, preview, capture
+- [x] Install `indi_pylibcamera` + `indiserver` (+ deps : lxml, astropy)
+- [x] Toggle INDI on/off depuis la page HTML (start_indi/stop_indi WS, subprocess indiserver)
+- [ ] Service `minicam-indi.service` dédié avec `Conflicts=minicam-api.service`
+- [ ] Test depuis Open Live Stacker (smartphone) en WiFi — OLS+indi_pylibcamera non documenté, combinaison non validée
+- [x] **Critère de succès partiel** : KStars voit l'IMX290 via INDI (port 7624) — infrastructure INDI validée
 
 ### Phase 8 — Client côté RPiCamera2
 
@@ -359,7 +362,7 @@ minicam/
 
 ## 8. Points d'attention / pièges connus
 
-- **Driver capteur (famille IMX290)** : le module Innomaker actuellement connecté est un **IMX327** (même famille que l'IMX462 cible). Utiliser `dtoverlay=imx290,clock-frequency=74250000` pour les deux. La clock XCLK Innomaker est 74.25 MHz au lieu des 37.125 MHz par défaut — sans ce paramètre, le frontend CSI-2 (Unicam) timeout immédiatement. Les drivers imx290/imx462 sont interchangeables pour cette famille de capteurs.
+- **Driver capteur** : utiliser `dtoverlay=imx462,clock-frequency=74250000`. La clock XCLK Innomaker est 74.25 MHz au lieu des 37.125 MHz par défaut — sans ce paramètre, le frontend CSI-2 (Unicam) timeout immédiatement. Libcamera charge automatiquement le fichier de tuning `/usr/share/libcamera/ipa/rpi/vc4/imx462.json`.
 - **USB gadget + alimentation** : le port USB du Pi0 doit être en mode OTG ; vérifier `dr_mode = peripheral` dans le DT.
 - **RAM** : surveiller `free -h` régulièrement. Objectif < 200 Mo utilisés en mode API actif. Si on dépasse, désactiver agressivement les services non utilisés.
 - **Banding horizontal IMX585** : problème connu lié à la qualité d'alim. À surveiller aussi sur IMX462 si on alimente sur batterie — soigner les découplages côté LDO.

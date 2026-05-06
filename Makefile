@@ -5,7 +5,7 @@ SYSTEMD_DIR := /etc/systemd/system
 .PHONY: deploy deploy-systemd logs restart status bootstrap
 
 deploy:
-	rsync -av --delete src/ $(PI0):$(REMOTE_DIR)/src/
+	rsync -av --delete --exclude='__pycache__' src/ $(PI0):$(REMOTE_DIR)/src/
 	rsync -av web/ $(PI0):$(REMOTE_DIR)/web/
 
 deploy-systemd:

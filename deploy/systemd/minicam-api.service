@@ -8,7 +8,7 @@ Type=simple
 User=admin
 WorkingDirectory=/opt/minicam
 Environment=PYTHONPATH=/opt/minicam/src
-ExecStart=/opt/minicam/venv/bin/python -m minicam
+ExecStart=/usr/bin/python3 -m minicam
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
