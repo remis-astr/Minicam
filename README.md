@@ -1,6 +1,6 @@
 # MiniCam
 
-Mini-caméra astrophoto autonome sur **Raspberry Pi Zero 2 W** + capteur **Sony IMX462** (StarVis 2), pilotable depuis un navigateur web ou via le protocole INDI.
+Mini-caméra astrophoto autonome sur **Raspberry Pi Zero 2 W** + capteur **Sony IMX462** (StarVis ), pilotable depuis un navigateur web ou via le protocole INDI.
 
 ---
 
