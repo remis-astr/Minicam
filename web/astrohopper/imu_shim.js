@@ -34,6 +34,7 @@
       if (typeof gdata === 'undefined') return;
       const d = JSON.parse(ev.data);
       gdata.alpha_gyro = d.alpha;
+      gdata.alpha      = d.alpha;
       gdata.beta       = d.beta;
       gdata.gamma      = d.gamma;
       // Efface le message "No Gyro" si présent
