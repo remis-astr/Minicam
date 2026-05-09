@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -18,7 +19,14 @@ async def ws_imu(websocket: WebSocket) -> None:
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=5)
 
     def on_angles(alpha: float, beta: float, gamma: float) -> None:
-        msg = json.dumps({"alpha": round(alpha, 2), "beta": round(beta, 2), "gamma": round(gamma, 2)})
+        q = streamer.q  # [w,x,y,z] — snapshot written atomically under GIL
+        msg = json.dumps({
+            "q": [round(v, 5) for v in q],
+            "alpha": round(alpha, 2),
+            "beta":  round(beta, 2),
+            "gamma": round(gamma, 2),
+            "t": int(time.time() * 1000),
+        })
         try:
             loop.call_soon_threadsafe(queue.put_nowait, msg)
         except asyncio.QueueFull:
