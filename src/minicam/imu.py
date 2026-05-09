@@ -77,6 +77,7 @@ class IMUStreamer:
         self.alpha: float = 0.0
         self.beta:  float = 0.0
         self.gamma: float = 0.0
+        self.q: list[float] = [1.0, 0.0, 0.0, 0.0]  # [w,x,y,z] latest quaternion
         self.running: bool = False
 
     # ------------------------------------------------------------------
@@ -113,7 +114,7 @@ class IMUStreamer:
 
         try:
             import ahrs
-            filt = ahrs.filters.Madgwick(frequency=float(self.FREQ), beta=0.033)
+            filt = ahrs.filters.Mahony(frequency=float(self.FREQ), kP=2.0, kI=0.005)
         except Exception as exc:
             log.error("IMU: Madgwick init failed — %s", exc)
             return
@@ -131,24 +132,41 @@ class IMUStreamer:
         gyr_bias /= CALIB_N
         log.info("IMU gyro bias calibrated: [%.4f, %.4f, %.4f] rad/s", *gyr_bias)
 
-        # Below this norm the gyro is treated as stationary (prevents accel-noise oscillation)
-        GYR_DEADZONE = 0.008  # rad/s ≈ 0.46°/s — well below any intentional movement
-
         log.info("IMU loop started @ %d Hz", self.FREQ)
+
+        _dbg_counter = 0
 
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
                 acc, gyr = mpu.read()
                 gyr -= gyr_bias
-                if np.linalg.norm(gyr) >= GYR_DEADZONE:
-                    # MPU mounted Y-up: remap [X,Y,Z] → [X,-Z,Y] so filter's Z
-                    # aligns with physical Y (vertical) → alpha = azimuth rotation.
-                    acc_f = np.array([ acc[0], -acc[2],  acc[1]])
-                    gyr_f = np.array([ gyr[0], -gyr[2],  gyr[1]])
-                    q = filt.updateIMU(q, gyr_f, acc_f)
+                # MPU mounted Y-up: remap so filter-Z (gravity) = physical-Y.
+                # [X, -Z, Y]: filter-X=phys-X, filter-Y=-phys-Z, filter-Z=phys-Y
+                acc_f = np.array([ acc[0], -acc[2],  acc[1]])
+                gyr_f = np.array([ gyr[0], -gyr[2],  gyr[1]])
+
+                # Debug: log dominant physical vs filter axis when moving (≥6°/s)
+                _AXES = ('X', 'Y', 'Z')
+                _DBG_THRESH = 0.10   # rad/s ≈ 6°/s
+                if np.max(np.abs(gyr)) > _DBG_THRESH:
+                    _dbg_counter += 1
+                    if _dbg_counter % 5 == 0:   # throttle: ~10 Hz at 50 Hz loop
+                        dom_raw = int(np.argmax(np.abs(gyr)))
+                        dom_f   = int(np.argmax(np.abs(gyr_f)))
+                        print(
+                            f"[IMU-DBG] phys {_AXES[dom_raw]}={gyr[dom_raw]*180/math.pi:+.0f}°/s"
+                            f"  →  filter {_AXES[dom_f]}={gyr_f[dom_f]*180/math.pi:+.0f}°/s"
+                            f"  | raw({gyr[0]*180/math.pi:+.0f},{gyr[1]*180/math.pi:+.0f},{gyr[2]*180/math.pi:+.0f})"
+                            f"  q=[{q[0]:.3f},{q[1]:.3f},{q[2]:.3f},{q[3]:.3f}]",
+                            flush=True,
+                        )
+                else:
+                    _dbg_counter = 0
+                q = filt.updateIMU(q, gyr_f, acc_f)
                 alpha, beta, gamma = _quat_to_euler_zxy(q)
                 self.alpha, self.beta, self.gamma = alpha, beta, gamma
+                self.q = q.tolist()
                 with self._lock:
                     cbs = list(self._callbacks)
                 for cb in cbs:
