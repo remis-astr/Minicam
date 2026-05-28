@@ -29,10 +29,14 @@ async def ws_imu(websocket: WebSocket) -> None:
             "t":   int(time.time() * 1000),
             "sid": streamer.session_id,
         })
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, msg)
-        except asyncio.QueueFull:
-            pass   # client too slow — drop frame
+
+        def _enqueue() -> None:
+            try:
+                queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass   # client too slow — drop frame silently
+
+        loop.call_soon_threadsafe(_enqueue)
 
     streamer.add_callback(on_angles)
     log.info("IMU WebSocket client connected")
@@ -96,50 +100,12 @@ async def calibration_get(req: Request) -> JSONResponse:
     return JSONResponse(req.app.state.imu.calibration_status())
 
 
-# ---------------------------------------------------------------------------
-# Inclinometer calibration endpoints
-# ---------------------------------------------------------------------------
-
-@router.post("/imu/incl_cal/sample")
-async def incl_cal_sample(req: Request) -> JSONResponse:
-    """Capture ~1.5 s of raw accelerometer data while scope is held still.
-
-    Returns mean raw acc [x, y, z] in m/s² (before any calibration).
-    The caller provides the known elevation angle (from inclinometer).
-    """
-    imu  = req.app.state.imu
-    loop = asyncio.get_event_loop()
-    imu.incl_capture_start(75)   # 75 samples @ 50 Hz = 1.5 s
-    try:
-        mean = await loop.run_in_executor(None, imu.incl_capture_wait)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail=str(exc))
-    return JSONResponse({"acc_mean": [round(float(v), 6) for v in mean]})
-
-
-@router.post("/imu/incl_cal/apply")
-async def incl_cal_apply(req: Request) -> JSONResponse:
-    """Apply and persist an inclinometer-fitted calibration.
-
-    Body: {"offset": [ox, oy, oz], "scale": [sx, sy, sz]}
-    """
-    body = await req.json()
-    try:
-        offset = body["offset"]
-        scale  = body["scale"]
-    except KeyError as exc:
-        raise HTTPException(status_code=422, detail=f"Missing field: {exc}")
-    req.app.state.imu.apply_calibration(offset, scale)
-    return JSONResponse({"ok": True})
-
-
 @router.post("/imu/restart")
 async def imu_restart(req: Request) -> JSONResponse:
-    """Restart the Mahony filter (reset integral + re-calibrate gyro bias).
+    """Restart the BNO085 loop and issue a new session ID.
 
-    Must be called after inclinometer calibration to flush the stale Mahony
-    integral term that was trained on the old accelerometer readings.
-    Blocks ~2 s while the new loop calibrates gyro bias.
+    Call after the IMU is reconnected or after inclinometer calibration.
+    Forces Finder clients to discard the stale Nord anchor (session_id change).
     """
     loop = asyncio.get_event_loop()
     imu  = req.app.state.imu
