@@ -1,4 +1,8 @@
-"""MPU6050 reader + Mahony filter → ZXY Euler angles (W3C DeviceOrientation convention)."""
+"""BNO085 reader → ZXY Euler angles (W3C DeviceOrientation convention).
+
+The BNO085 runs internal sensor fusion (Game Rotation Vector at ~100 Hz).
+Quaternions are read directly — no external Mahony filter needed.
+"""
 from __future__ import annotations
 
 import json
@@ -11,31 +15,23 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-import smbus2
 
 log = logging.getLogger(__name__)
 
-# MPU6050 registers
-_ADDR        = 0x68
-_PWR_MGMT_1  = 0x6B
-_ACCEL_OUT   = 0x3B   # 6 bytes: AX_H AX_L AY_H AY_L AZ_H AZ_L
-_GYRO_OUT    = 0x43   # 6 bytes: GX_H GX_L GY_H GY_L GZ_H GZ_L
-_ALL_OUT     = 0x3B   # 14 bytes: accel(6) + temp(2) + gyro(6)
-
-_ACCEL_SCALE = 16384.0   # ±2g → LSB/g
-_GYRO_SCALE  = 131.0     # ±250°/s → LSB/°/s
-_DEG2RAD     = math.pi / 180.0
-_G           = 9.80665
+_ADDR = 0x4A   # ADR pin → GND
+_G    = 9.80665
 
 _CAL_FILE      = Path("/home/admin/.config/minicam/imu_cal.json")
-_CAL_SUBSAMPLE = 10    # 1 sample per 10 ticks → 5 Hz at 50 Hz loop
-_CAL_MAX       = 500   # cap sample buffer
-_CAL_MIN       = 50    # minimum samples required to fit
+_CAL_SUBSAMPLE = 10
+_CAL_MAX       = 500
+_CAL_MIN       = 50
 
+_INIT_RETRY_DELAYS = (5, 10, 30, 60)  # seconds between successive init attempts
 
-def _s16(hi: int, lo: int) -> int:
-    v = (hi << 8) | lo
-    return v - 65536 if v >= 32768 else v
+# Mount orientation correction [w,x,y,z] — compensates for PCB orientation on scope.
+# Identity = no correction. Adjust empirically after first run by comparing
+# β(elev) direction against known sky objects.
+_MOUNT_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 
 
 def _fit_accel_calibration(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -53,39 +49,16 @@ def _fit_accel_calibration(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray,
             f"insufficient coverage — axis spans (m/s²): {spans.round(2)}. "
             "Move the scope to more diverse altitudes and azimuths."
         )
-
     x, y, z = samples[:, 0], samples[:, 1], samples[:, 2]
     D_mat = np.column_stack([x**2, y**2, z**2, x, y, z])
     v, *_ = np.linalg.lstsq(D_mat, np.ones(len(samples)), rcond=None)
     pA, pB, pC, pD, pE, pF = v
-
     offset = np.array([-pD / (2.0 * pA), -pE / (2.0 * pB), -pF / (2.0 * pC)])
     k      = 1.0 + pD**2 / (4.0 * pA) + pE**2 / (4.0 * pB) + pF**2 / (4.0 * pC)
     scale  = _G * np.sqrt(np.abs([pA, pB, pC]) / k)
-
     a_cal  = (samples - offset) * scale
     rms_mg = float(np.sqrt(np.mean((np.linalg.norm(a_cal, axis=1) - _G) ** 2)) / _G * 1000)
     return offset, scale, rms_mg
-
-
-class MPU6050:
-    def __init__(self, bus: int = 1, addr: int = _ADDR) -> None:
-        self._bus  = smbus2.SMBus(bus)
-        self._addr = addr
-        self._bus.write_byte_data(addr, _PWR_MGMT_1, 0x00)   # wake up
-        time.sleep(0.1)
-
-    def read(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return (accel m/s², gyro rad/s) in sensor frame."""
-        d = self._bus.read_i2c_block_data(self._addr, _ALL_OUT, 14)
-        ax = _s16(d[0],  d[1])  / _ACCEL_SCALE * _G
-        ay = _s16(d[2],  d[3])  / _ACCEL_SCALE * _G
-        az = _s16(d[4],  d[5])  / _ACCEL_SCALE * _G
-        # d[6], d[7] = temperature, skipped
-        gx = _s16(d[8],  d[9])  / _GYRO_SCALE * _DEG2RAD
-        gy = _s16(d[10], d[11]) / _GYRO_SCALE * _DEG2RAD
-        gz = _s16(d[12], d[13]) / _GYRO_SCALE * _DEG2RAD
-        return np.array([ax, ay, az]), np.array([gx, gy, gz])
 
 
 def _quat_to_euler_zxy(q: np.ndarray) -> tuple[float, float, float]:
@@ -102,10 +75,22 @@ def _quat_to_euler_zxy(q: np.ndarray) -> tuple[float, float, float]:
     return alpha, beta, gamma
 
 
-class IMUStreamer:
-    """Reads MPU6050 at FREQ Hz, runs Mahony, broadcasts Euler angles to callbacks."""
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product of two quaternions [w,x,y,z]."""
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ])
 
-    FREQ = 50  # Hz
+
+class IMUStreamer:
+    """Reads BNO085 Game Rotation Vector and broadcasts ZXY Euler angles to callbacks."""
+
+    FREQ = 100  # Hz — matches BNO085 native Game RV output rate
 
     def __init__(self) -> None:
         self._callbacks: list[Callable[[float, float, float], None]] = []
@@ -115,11 +100,10 @@ class IMUStreamer:
         self.alpha: float = 0.0
         self.beta:  float = 0.0
         self.gamma: float = 0.0
-        self.q: list[float] = [1.0, 0.0, 0.0, 0.0]  # [w,x,y,z] latest quaternion
+        self.q: list[float] = [1.0, 0.0, 0.0, 0.0]
         self.running: bool = False
-        self.session_id: str = uuid.uuid4().hex   # unique per Mahony filter lifetime
+        self.session_id: str = uuid.uuid4().hex
 
-        # Accelerometer calibration (ellipsoid)
         self._cal_lock       = threading.Lock()
         self._cal_offset     = np.zeros(3)
         self._cal_scale      = np.ones(3)
@@ -127,12 +111,6 @@ class IMUStreamer:
         self._cal_samples: list[np.ndarray] = []
         self._cal_tick       = 0
         self.load_calibration()
-
-        # Inclinometer calibration — raw-acc burst capture
-        self._raw_lock = threading.Lock()
-        self._raw_buf:  list[np.ndarray] = []
-        self._raw_need: int = 0
-        self._raw_evt   = threading.Event()
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -194,7 +172,6 @@ class IMUStreamer:
         with self._cal_lock:
             self._cal_collecting = False
             samples = np.array(self._cal_samples) if self._cal_samples else np.zeros((0, 3))
-        # Fit outside lock — may raise ValueError on bad data
         offset, scale, rms_mg = _fit_accel_calibration(samples)
         with self._cal_lock:
             self._cal_offset = offset
@@ -208,43 +185,13 @@ class IMUStreamer:
             "n_samples": len(samples),
         }
 
-    # ------------------------------------------------------------------
-    # Inclinometer calibration API
-    # ------------------------------------------------------------------
-
-    def incl_capture_start(self, n: int = 75) -> None:
-        """Start collecting n raw acc samples (≈1.5 s at 50 Hz)."""
-        with self._raw_lock:
-            self._raw_buf  = []
-            self._raw_need = n
-            self._raw_evt.clear()
-
-    def incl_capture_wait(self, timeout: float = 6.0) -> np.ndarray:
-        """Block until n samples collected; return mean raw acc [3]."""
-        if not self._raw_evt.wait(timeout=timeout):
-            raise TimeoutError(f"Inclinometer capture timed out after {timeout} s")
-        with self._raw_lock:
-            arr = np.array(self._raw_buf, dtype=float)
-            self._raw_need = 0   # stop collecting — avoids lock churn at 50 Hz
-        return arr.mean(axis=0)
-
-    def apply_calibration(self, offset: list, scale: list) -> None:
-        """Apply and persist a calibration (offset + scale per axis)."""
-        with self._cal_lock:
-            self._cal_offset = np.array(offset, dtype=float)
-            self._cal_scale  = np.array(scale,  dtype=float)
-        self.save_calibration()
-        log.info("IMU incl cal applied: offset=%s scale=%s", self._cal_offset, self._cal_scale)
-
     def restart_filter(self) -> None:
-        """Restart the IMU loop: resets Mahony integral + re-calibrates gyro bias.
+        """Restart the IMU loop and issue a new session ID.
 
-        Must be called after applying inclinometer calibration — the Mahony
-        integral (kI) was trained on the old accelerometer readings and would
-        otherwise over-correct the gyroscope for ~200 s causing yaw drift.
-        Blocks until the new loop has started (~2 s for gyro bias calibration).
+        Forces WS clients to re-sync (session_id change).
+        Much faster than MPU6050 version — no gyro bias calibration delay.
         """
-        log.info("IMU: restarting filter (Mahony integral reset)…")
+        log.info("IMU: restarting…")
         self._stop.set()
         self.running = False
         if self._thread:
@@ -255,7 +202,7 @@ class IMUStreamer:
         self._thread = threading.Thread(target=self._loop, daemon=True, name="imu-loop")
         self._thread.start()
         self.running = True
-        log.info("IMU: filter restarted, new session %s", self.session_id[:8])
+        log.info("IMU: restarted, new session %s", self.session_id[:8])
 
     def calibration_reset(self) -> None:
         with self._cal_lock:
@@ -281,126 +228,80 @@ class IMUStreamer:
 
     # ------------------------------------------------------------------
     def _loop(self) -> None:
-        try:
-            mpu = MPU6050()
-        except Exception as exc:
-            log.error("IMU: MPU6050 init failed — %s", exc)
-            return
+        from adafruit_bno08x import BNO_REPORT_ACCELEROMETER, BNO_REPORT_GAME_ROTATION_VECTOR
+        from adafruit_bno08x.i2c import BNO08X_I2C
+        from adafruit_extended_bus import ExtendedI2C
 
-        try:
-            import ahrs
-            # kI=0.01: time constant ~100 s — enough to track slow gyro temperature drift
-            # while staying conservative (kP=2.0 >> 2*kI=0.02 → well within stability margin)
-            filt = ahrs.filters.Mahony(frequency=float(self.FREQ), kP=2.0, kI=0.01)
-        except Exception as exc:
-            log.error("IMU: Mahony init failed — %s", exc)
-            return
+        # Retry init with backoff — BNO085 may not be ready immediately after boot
+        # or may be temporarily unreachable (power glitch, I2C reset).
+        bno = None
+        for attempt, delay in enumerate((*_INIT_RETRY_DELAYS, None), start=1):
+            if self._stop.is_set():
+                return
+            try:
+                # Bus 8 = software I2C (i2c-gpio overlay, GPIO2/GPIO3).
+                # Handles BNO085 clock stretching that BCM2835 hardware I2C cannot tolerate.
+                i2c = ExtendedI2C(8)
+                bno = BNO08X_I2C(i2c, address=_ADDR)
+                bno.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
+                bno.enable_feature(BNO_REPORT_ACCELEROMETER)
+                break
+            except Exception as exc:
+                if delay is None:
+                    log.error("IMU: BNO085 init failed after %d attempts — giving up: %s", attempt, exc)
+                    return
+                log.warning("IMU: BNO085 init attempt %d failed (%s) — retry in %ds", attempt, exc, delay)
+                self._stop.wait(delay)
 
-        q   = np.array([1.0, 0.0, 0.0, 0.0])
-        dt  = 1.0 / self.FREQ
+        dt = 1.0 / self.FREQ
+        log.info("IMU loop started @ %d Hz (BNO085 Game Rotation Vector)", self.FREQ)
 
-        # Calibrate gyro bias: average 300 samples at rest (~6 s)
-        # More samples → lower standard error on bias estimate, especially for Z
-        # (yaw axis: no accelerometer correction, only kI can compensate residual bias)
-        CALIB_N = 300
-        gyr_bias = np.zeros(3)
-        for _ in range(CALIB_N):
-            _, gyr = mpu.read()
-            gyr_bias += gyr
-            time.sleep(dt)
-        gyr_bias /= CALIB_N
-        log.info("IMU gyro bias calibrated: [%.4f, %.4f, %.4f] rad/s", *gyr_bias)
-        log.info("IMU remap v7: acc_f=[Y,-X,Z]  gyr_f=[Y,-X,Z]  (filter-Y=-phys-X → beta=+90 at zenith)")
-
-        _dbg_counter  = 0
-        _static_ticks = 0   # for periodic static log
-
-        log.info("IMU loop started @ %d Hz", self.FREQ)
+        _static_ticks = 0
 
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
-                acc, gyr = mpu.read()
-                gyr -= gyr_bias
+                # --- Quaternion (Game Rotation Vector) ---
+                raw = bno.game_quaternion   # (i, j, k, real) or None if no new packet yet
+                if raw is not None:
+                    qi, qj, qk, qr = raw
+                    # Adafruit returns (i,j,k,real) — convert to [w,x,y,z]
+                    q_sensor = np.array([qr, qi, qj, qk])
+                    # Apply mount rotation: q_world = _MOUNT_QUAT ⊗ q_sensor
+                    q = _quat_mul(_MOUNT_QUAT, q_sensor)
+                    norm = np.linalg.norm(q)
+                    if norm > 1e-9:
+                        q /= norm
 
-                # Collect raw sample for ellipsoid calibration if active
-                if self._cal_collecting:
+                    alpha, beta, gamma = _quat_to_euler_zxy(q)
+                    self.alpha, self.beta, self.gamma = alpha, beta, gamma
+                    self.q = q.tolist()
+
+                    with self._lock:
+                        cbs = list(self._callbacks)
+                    for cb in cbs:
+                        try:
+                            cb(alpha, beta, gamma)
+                        except Exception:
+                            pass
+
+                    _static_ticks += 1
+                    if _static_ticks % (self.FREQ * 2) == 0:
+                        log.debug(
+                            "IMU α=%.1f° β=%.1f° γ=%.1f°  q=[%.3f,%.3f,%.3f,%.3f]",
+                            alpha, beta, gamma, *q,
+                        )
+
+                # --- Accelerometer (for ellipsoid calibration) ---
+                acc_raw = bno.acceleration   # (x, y, z) m/s² or None
+                if acc_raw is not None and self._cal_collecting:
+                    acc = np.array(acc_raw)
                     self._cal_tick += 1
                     if self._cal_tick % _CAL_SUBSAMPLE == 0:
                         with self._cal_lock:
                             if len(self._cal_samples) < _CAL_MAX:
                                 self._cal_samples.append(acc.copy())
 
-                # Collect raw sample for inclinometer calibration if active
-                with self._raw_lock:
-                    if self._raw_need > 0 and len(self._raw_buf) < self._raw_need:
-                        self._raw_buf.append(acc.copy())
-                        if len(self._raw_buf) >= self._raw_need:
-                            self._raw_evt.set()
-
-                # Apply accelerometer calibration (identity until calibrated)
-                with self._cal_lock:
-                    cal_offset = self._cal_offset.copy()
-                    cal_scale  = self._cal_scale.copy()
-                acc = (acc - cal_offset) * cal_scale
-
-                # Physical layout (confirmed by gravity measurement):
-                #   phys-X = optical axis  → acc[0] = g·sin(elev), zero when horizontal
-                #   phys-Y = altitude trunnion (always horizontal) → acc[1] ≈ 0
-                #   phys-Z = up when horizontal (vertical/gravity) → acc[2] = g·cos(elev)
-                #
-                # Remap so Mahony sees gravity on filter-Z and altitude rotation on filter-X:
-                #   filter-X = phys-Y (altitude trunnion → beta = elevation)
-                #   filter-Y = -phys-X (optical axis negated → Mahony beta goes +90° at zenith)
-                #   filter-Z = phys-Z (up-when-horizontal → gravity anchor → alpha = azimuth)
-                # acc_f[1] = -acc[0]: gravity moves toward -filter-Y as tube rises,
-                #   giving beta = R_x(+90°) = +90° at zenith (not -90°).
-                acc_f = np.array([ acc[1], -acc[0],  acc[2]])
-                gyr_f = np.array([ gyr[1], -gyr[0],  gyr[2]])
-
-                # ── Debug: dominant gyro axis during movement (≥6°/s) ──────────────
-                _AXES = ('X', 'Y', 'Z')
-                _DBG_THRESH = 0.10   # rad/s ≈ 6°/s
-                moving = np.max(np.abs(gyr)) > _DBG_THRESH
-                if moving:
-                    _dbg_counter += 1
-                    _static_ticks = 0
-                    if _dbg_counter % 5 == 0:   # throttle: ~10 Hz at 50 Hz loop
-                        dom_raw = int(np.argmax(np.abs(gyr)))
-                        dom_f   = int(np.argmax(np.abs(gyr_f)))
-                        alpha_d, beta_d, gamma_d = _quat_to_euler_zxy(q)
-                        print(
-                            f"[IMU-MOV] phys {_AXES[dom_raw]}={gyr[dom_raw]*180/math.pi:+.0f}°/s"
-                            f"  →  filter-{_AXES[dom_f]}={gyr_f[dom_f]*180/math.pi:+.0f}°/s"
-                            f"  | α={alpha_d:.1f}° β(elev)={beta_d:.1f}° γ={gamma_d:.1f}°"
-                            f"  | acc=[{acc[0]/_G:+.2f}g,{acc[1]/_G:+.2f}g,{acc[2]/_G:+.2f}g]",
-                            flush=True,
-                        )
-                else:
-                    _dbg_counter = 0
-                    _static_ticks += 1
-                    # Log static orientation + gravity every 2 s to confirm remap
-                    if _static_ticks % (self.FREQ * 2) == 0:
-                        alpha_s, beta_s, gamma_s = _quat_to_euler_zxy(q)
-                        dom_acc = int(np.argmax(np.abs(acc)))
-                        print(
-                            f"[IMU-STAT] α={alpha_s:.1f}° β(elev)={beta_s:.1f}° γ={gamma_s:.1f}°"
-                            f"  | acc=[{acc[0]/_G:+.2f}g,{acc[1]/_G:+.2f}g,{acc[2]/_G:+.2f}g]"
-                            f"  dominant=phys-{_AXES[dom_acc]}",
-                            flush=True,
-                        )
-
-                q = filt.updateIMU(q, gyr_f, acc_f)
-                alpha, beta, gamma = _quat_to_euler_zxy(q)
-                self.alpha, self.beta, self.gamma = alpha, beta, gamma
-                self.q = q.tolist()
-                with self._lock:
-                    cbs = list(self._callbacks)
-                for cb in cbs:
-                    try:
-                        cb(alpha, beta, gamma)
-                    except Exception:
-                        pass
             except Exception as exc:
                 log.warning("IMU read error: %s", exc)
 
