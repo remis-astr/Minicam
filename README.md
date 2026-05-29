@@ -23,7 +23,7 @@ Mini-caméra astrophoto autonome sur **Raspberry Pi Zero 2 W** + capteur **Sony 
 | Carte | Raspberry Pi Zero 2 W |
 | Capteur | Sony IMX462 (Innomaker, StarVis 2) |
 | OS | BWL64_STARVIS2 (Bookworm Lite 64-bit) |
-| IMU | MPU6050 sur I2C (navigation AstroHopper) |
+| IMU | BNO085 sur I2C (navigation AstroHopper) |
 | Alimentation | Batteries 18650 + LDO TPS3245 ou USB |
 
 ---
