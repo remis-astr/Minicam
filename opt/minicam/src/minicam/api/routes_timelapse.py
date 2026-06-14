@@ -272,11 +272,6 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     gain = float(params.get("gain", camera.gain))
     exposure_ms = float(params.get("exposure_ms", camera.exposure_us / 1000))
     end_str = params.get("end_time", "23:59")
-    contrast        = float(params.get("contrast",        1.0))
-    sharpness       = float(params.get("sharpness",       1.0))
-    saturation      = float(params.get("saturation",      1.0))
-    brightness      = float(params.get("brightness",      0.0))
-    noise_reduction = int(params.get("noise_reduction",   2))   # 0=Off 1=Fast 2=HighQuality
     wb_red  = float(params.get("wb_red",  camera.wb_red))
     wb_blue = float(params.get("wb_blue", camera.wb_blue))
 
@@ -313,8 +308,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     try:
         await loop.run_in_executor(
             None, camera.apply_timelapse_settings,
-            gain, exposure_ms, contrast, sharpness, wb_red, wb_blue,
-            saturation, brightness, noise_reduction,
+            gain, exposure_ms, wb_red, wb_blue,
         )
 
         await _broadcast(app, {

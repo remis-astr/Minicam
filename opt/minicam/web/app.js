@@ -8,9 +8,14 @@ let reconnectTimer = null;
 const elStatus      = document.getElementById('ws-status');
 const elGainInput   = document.getElementById('gain-input');
 const elExpoInput   = document.getElementById('expo-input');
-const elWbRedInput  = document.getElementById('wb-red-input');
-const elWbBlueInput = document.getElementById('wb-blue-input');
-const elResSelect   = document.getElementById('res-select');
+const elWbRedInput       = document.getElementById('wb-red-input');
+const elWbBlueInput      = document.getElementById('wb-blue-input');
+const elContrastInput    = document.getElementById('contrast-input');
+const elSharpnessInput   = document.getElementById('sharpness-input');
+const elSaturationInput  = document.getElementById('saturation-input');
+const elBrightnessInput  = document.getElementById('brightness-input');
+const elNrInput          = document.getElementById('nr-input');
+const elResSelect        = document.getElementById('res-select');
 const elReconnect   = document.getElementById('btn-reconnect');
 const elStatusBar   = document.getElementById('status-bar');
 
@@ -18,12 +23,17 @@ function setStatus(msg) { elStatusBar.textContent = msg; }
 
 
 function setControls(enabled) {
-  elGainInput.disabled   = !enabled;
-  elExpoInput.disabled   = !enabled;
-  elWbRedInput.disabled  = !enabled;
-  elWbBlueInput.disabled = !enabled;
-  elResSelect.disabled   = !enabled;
-  elBtnSeqStart.disabled = !enabled;
+  elGainInput.disabled      = !enabled;
+  elExpoInput.disabled      = !enabled;
+  elWbRedInput.disabled     = !enabled;
+  elWbBlueInput.disabled    = !enabled;
+  elContrastInput.disabled   = !enabled;
+  elSharpnessInput.disabled  = !enabled;
+  elSaturationInput.disabled = !enabled;
+  elBrightnessInput.disabled = !enabled;
+  elNrInput.disabled         = !enabled;
+  elResSelect.disabled       = !enabled;
+  elBtnSeqStart.disabled     = !enabled;
   if (document.getElementById('btn-tl-start'))
     document.getElementById('btn-tl-start').disabled = !enabled;
 }
@@ -76,6 +86,11 @@ function connect() {
         elWbRedInput.value = parseFloat(msg.wb_blue).toFixed(2);
         elWbRedInput.classList.remove('input-error');
       }
+      if (msg.contrast !== undefined)       elContrastInput.value   = parseFloat(msg.contrast).toFixed(1);
+      if (msg.sharpness !== undefined)      elSharpnessInput.value  = parseFloat(msg.sharpness).toFixed(1);
+      if (msg.saturation !== undefined)     elSaturationInput.value = parseFloat(msg.saturation).toFixed(1);
+      if (msg.brightness !== undefined)     elBrightnessInput.value = parseFloat(msg.brightness).toFixed(2);
+      if (msg.noise_reduction !== undefined) elNrInput.value = msg.noise_reduction;
     }
 
     if (msg.cmd === 'error')        setStatus('Erreur : ' + msg.detail);
@@ -135,6 +150,23 @@ function sendWb() {
 
 attachValueInput(elWbRedInput,  0.1, 8, sendWb);
 attachValueInput(elWbBlueInput, 0.1, 8, sendWb);
+
+function sendIsp() {
+  send({
+    cmd: 'set_isp',
+    contrast:       parseFloat(elContrastInput.value),
+    sharpness:      parseFloat(elSharpnessInput.value),
+    saturation:     parseFloat(elSaturationInput.value),
+    brightness:     parseFloat(elBrightnessInput.value),
+    noise_reduction: parseInt(elNrInput.value),
+  });
+}
+
+attachValueInput(elContrastInput,   0,  32, () => sendIsp());
+attachValueInput(elSharpnessInput,  0,  16, () => sendIsp());
+attachValueInput(elSaturationInput, 0,  32, () => sendIsp());
+attachValueInput(elBrightnessInput, -1,  1, () => sendIsp());
+elNrInput.addEventListener('change', sendIsp);
 
 elResSelect.addEventListener('change', () => {
   send({ cmd: 'set_resolution', value: elResSelect.value });
@@ -428,40 +460,27 @@ elBtnShutdown.addEventListener('click', () => sysAction('shutdown', 'Arrêt'));
 const elTlMode       = document.getElementById('tl-mode');
 const elTlGain       = document.getElementById('tl-gain');
 const elTlExpo       = document.getElementById('tl-expo');
-const elTlContrast   = document.getElementById('tl-contrast');
-const elTlSharpness  = document.getElementById('tl-sharpness');
 const elTlWbRed      = document.getElementById('tl-wb-red');
 const elTlWbBlue     = document.getElementById('tl-wb-blue');
 const elTlEndTime    = document.getElementById('tl-end-time');
 const elBtnTlStart   = document.getElementById('btn-tl-start');
 const elBtnTlStop    = document.getElementById('btn-tl-stop');
 const elTlStatus     = document.getElementById('tl-status');
-const elTlIspSettings = document.getElementById('tl-isp-settings');
 const elTlPreviewBox = document.getElementById('tl-preview-box');
 const elTlPreviewImg = document.getElementById('tl-preview-img');
 
 let tlPreviewTimer = null;
 
-// Masquer les réglages ISP si mode RAW
-elTlMode.addEventListener('change', () => {
-  elTlIspSettings.style.display = elTlMode.value === 'raw_fits' ? 'none' : '';
-});
-
 elBtnTlStart.addEventListener('click', () => {
-  const params = {
+  send({
     cmd: 'start_timelapse',
     mode: elTlMode.value,
     gain: parseFloat(elTlGain.value),
     exposure_ms: parseFloat(elTlExpo.value),
     end_time: elTlEndTime.value,
-  };
-  if (elTlMode.value !== 'raw_fits') {
-    params.contrast  = parseFloat(elTlContrast.value);
-    params.sharpness = parseFloat(elTlSharpness.value);
-    params.wb_red    = parseFloat(elTlWbRed.value);
-    params.wb_blue   = parseFloat(elTlWbBlue.value);
-  }
-  send(params);
+    wb_red:  parseFloat(elTlWbRed.value),
+    wb_blue: parseFloat(elTlWbBlue.value),
+  });
 });
 
 elBtnTlStop.addEventListener('click', () => send({ cmd: 'stop_timelapse' }));
@@ -469,6 +488,12 @@ elBtnTlStop.addEventListener('click', () => send({ cmd: 'stop_timelapse' }));
 function _tlSetRunning(running) {
   elBtnTlStart.classList.toggle('hidden', running);
   elBtnTlStop.classList.toggle('hidden', !running);
+  // ISP controls disabled during timelapse (settings apply at start)
+  elContrastInput.disabled   = running;
+  elSharpnessInput.disabled  = running;
+  elSaturationInput.disabled = running;
+  elBrightnessInput.disabled = running;
+  elNrInput.disabled         = running;
   if (running) {
     elTlPreviewBox.classList.remove('hidden');
     _startTlPreview();

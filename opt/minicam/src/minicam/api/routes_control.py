@@ -35,6 +35,22 @@ def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any]
     if cmd == "set_wb":
         camera.set_wb(float(msg["red"]), float(msg["blue"]))
         return {"cmd": "ack", "wb_red": camera.wb_red, "wb_blue": camera.wb_blue}
+    if cmd == "set_isp":
+        camera.set_isp_controls(
+            float(msg.get("contrast",        camera.contrast)),
+            float(msg.get("sharpness",       camera.sharpness)),
+            float(msg.get("saturation",      camera.saturation)),
+            float(msg.get("brightness",      camera.brightness)),
+            int(msg.get("noise_reduction",   camera.noise_reduction)),
+        )
+        return {
+            "cmd": "ack",
+            "contrast": camera.contrast,
+            "sharpness": camera.sharpness,
+            "saturation": camera.saturation,
+            "brightness": camera.brightness,
+            "noise_reduction": camera.noise_reduction,
+        }
     if cmd == "set_resolution":
         try:
             camera.set_resolution(str(msg["value"]))

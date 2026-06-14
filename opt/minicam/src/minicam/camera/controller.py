@@ -27,6 +27,11 @@ class CameraController:
         self.resolution: str = state.get("resolution", "720p")
         self.wb_red: float = state.get("wb_red", 1.0)
         self.wb_blue: float = state.get("wb_blue", 1.0)
+        self.contrast: float = float(state.get("contrast", 1.0))
+        self.sharpness: float = float(state.get("sharpness", 1.0))
+        self.saturation: float = float(state.get("saturation", 1.0))
+        self.brightness: float = float(state.get("brightness", 0.0))
+        self.noise_reduction: int = int(state.get("noise_reduction", 1))
         self._lock = threading.Lock()
         self._picam2: Picamera2 | None = None
 
@@ -54,6 +59,11 @@ class CameraController:
                 "AeEnable": False,
                 "AwbEnable": False,
                 "ColourGains": (self.wb_red, self.wb_blue),
+                "Contrast":   self.contrast,
+                "Sharpness":  self.sharpness,
+                "Saturation": self.saturation,
+                "Brightness": self.brightness,
+                "NoiseReductionMode": self.noise_reduction,
             })
             self._picam2.start()
             log.info("Camera opened res=%s gain=%.1f exposure_us=%d", self.resolution, self.gain, self.exposure_us)
@@ -94,6 +104,32 @@ class CameraController:
                 self._picam2.start()
         self._persist()
         log.info("Resolution set to %s", self.resolution)
+
+    def set_isp_controls(
+        self,
+        contrast: float,
+        sharpness: float,
+        saturation: float,
+        brightness: float,
+        noise_reduction: int,
+    ) -> None:
+        with self._lock:
+            self.contrast = max(0.0, min(32.0, contrast))
+            self.sharpness = max(0.0, min(16.0, sharpness))
+            self.saturation = max(0.0, min(32.0, saturation))
+            self.brightness = max(-1.0, min(1.0, brightness))
+            self.noise_reduction = max(0, min(3, noise_reduction))
+            if self._picam2:
+                self._picam2.set_controls({
+                    "Contrast":   self.contrast,
+                    "Sharpness":  self.sharpness,
+                    "Saturation": self.saturation,
+                    "Brightness": self.brightness,
+                    "NoiseReductionMode": self.noise_reduction,
+                })
+        self._persist()
+        log.info("ISP controls: contrast=%.1f sharpness=%.1f saturation=%.1f brightness=%.2f NR=%d",
+                 self.contrast, self.sharpness, self.saturation, self.brightness, self.noise_reduction)
 
     def set_wb(self, red: float, blue: float) -> None:
         with self._lock:
@@ -209,15 +245,10 @@ class CameraController:
         self,
         gain: float,
         exposure_ms: float,
-        contrast: float,
-        sharpness: float,
         wb_red: float,
         wb_blue: float,
-        saturation: float = 1.0,
-        brightness: float = 0.0,
-        noise_reduction: int = 2,  # 0=Off 1=Fast 2=HighQuality 3=Minimal
     ) -> None:
-        """Apply timelapse settings once and drain the sensor pipeline."""
+        """Apply timelapse gain/exposure/WB and drain the sensor pipeline. Uses stored ISP values."""
         with self._lock:
             if not self._picam2:
                 raise RuntimeError("Camera not open")
@@ -228,12 +259,12 @@ class CameraController:
                 "AnalogueGain": max(1.0, min(64.0, gain)),
                 "ExposureTime": exp_us,
                 "FrameDurationLimits": (fd, fd),
-                "Contrast":   max(0.0, min(32.0, contrast)),
-                "Sharpness":  max(0.0, min(16.0, sharpness)),
-                "Saturation": max(0.0, min(32.0, saturation)),
-                "Brightness": max(-1.0, min(1.0, brightness)),
+                "Contrast":   self.contrast,
+                "Sharpness":  self.sharpness,
+                "Saturation": self.saturation,
+                "Brightness": self.brightness,
                 "ColourGains": (max(0.1, min(8.0, wb_red)), max(0.1, min(8.0, wb_blue))),
-                "NoiseReductionMode": max(0, min(3, noise_reduction)),
+                "NoiseReductionMode": self.noise_reduction,
             })
         tolerance = max(500, exp_us // 20)
         actual = 0
@@ -264,12 +295,12 @@ class CameraController:
                 "AnalogueGain": self.gain,
                 "ExposureTime": self.exposure_us,
                 "FrameDurationLimits": (fd, fd),
-                "Contrast":   1.0,
-                "Sharpness":  1.0,
-                "Saturation": 1.0,
-                "Brightness": 0.0,
+                "Contrast":   self.contrast,
+                "Sharpness":  self.sharpness,
+                "Saturation": self.saturation,
+                "Brightness": self.brightness,
                 "ColourGains": (self.wb_red, self.wb_blue),
-                "NoiseReductionMode": 1,  # Fast pour le preview
+                "NoiseReductionMode": self.noise_reduction,
             })
         log.info("Preview settings restored: gain=%.2f exposure_us=%d", self.gain, self.exposure_us)
 
@@ -299,11 +330,26 @@ class CameraController:
             "resolutions": list(RESOLUTIONS.keys()),
             "wb_red": self.wb_red,
             "wb_blue": self.wb_blue,
+            "contrast": self.contrast,
+            "sharpness": self.sharpness,
+            "saturation": self.saturation,
+            "brightness": self.brightness,
+            "noise_reduction": self.noise_reduction,
             "open": self._picam2 is not None,
         }
 
     def _persist(self) -> None:
         state = read_state()
-        state.update({"gain": self.gain, "exposure_us": self.exposure_us,
-                      "resolution": self.resolution, "wb_red": self.wb_red, "wb_blue": self.wb_blue})
+        state.update({
+            "gain": self.gain,
+            "exposure_us": self.exposure_us,
+            "resolution": self.resolution,
+            "wb_red": self.wb_red,
+            "wb_blue": self.wb_blue,
+            "contrast": self.contrast,
+            "sharpness": self.sharpness,
+            "saturation": self.saturation,
+            "brightness": self.brightness,
+            "noise_reduction": self.noise_reduction,
+        })
         write_state(state)
