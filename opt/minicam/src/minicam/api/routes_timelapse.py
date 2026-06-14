@@ -375,6 +375,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
                 await asyncio.shield(save_fut)
             except Exception:
                 pass
+        await _broadcast(app, {"cmd": "tl_done", "session": session_id, "frames": frame_count})
     except Exception as e:
         log.error("Timelapse error: %s", e)
         await _broadcast(app, {"cmd": "tl_error", "detail": str(e)})
