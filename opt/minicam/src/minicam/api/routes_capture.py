@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import zipfile
 from datetime import datetime
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -12,7 +9,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 router = APIRouter()
-SEQ_DIR = Path("/tmp/minicam_seq")
 
 
 def _ts() -> str:
@@ -92,33 +88,3 @@ async def capture_fits(request: Request) -> Response:
     )
 
 
-@router.get("/seq/{session_id}/zip")
-async def seq_zip(session_id: str) -> Response:
-    session_dir = SEQ_DIR / session_id
-    if not session_dir.is_dir():
-        return Response(status_code=404)
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(session_dir.glob("*.fits")):
-            zf.write(f, f"minicam_{session_id}_{f.stem}.fits")
-    return Response(
-        content=buf.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="minicam_seq_{session_id}.zip"'},
-    )
-
-
-@router.get("/seq/{session_id}/{index}")
-async def seq_frame(session_id: str, index: str) -> Response:
-    try:
-        idx = int(index)
-    except ValueError:
-        return Response(status_code=400)
-    filepath = SEQ_DIR / session_id / f"{idx:04d}.fits"
-    if not filepath.exists():
-        return Response(status_code=404)
-    return Response(
-        content=filepath.read_bytes(),
-        media_type="application/fits",
-        headers={"Content-Disposition": f'attachment; filename="minicam_{session_id}_{idx:04d}.fits"'},
-    )

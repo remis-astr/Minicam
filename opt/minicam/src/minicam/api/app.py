@@ -31,8 +31,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     camera.open()
     app.state.camera = camera
     app.state.seq_subscribers: list = []
-    app.state.seq_running = False
-    app.state.seq_task = None
     app.state.last_preview_jpeg = None
     app.state.indi_mode = False
     app.state.indi_proc = None
@@ -50,8 +48,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     imu.stop()
     if app.state.tl_task:
         app.state.tl_task.cancel()
-    if app.state.seq_task:
-        app.state.seq_task.cancel()
     if app.state.capture_task:
         app.state.capture_task.cancel()
     if app.state.indi_proc:

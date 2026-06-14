@@ -23,17 +23,16 @@ function setStatus(msg) { elStatusBar.textContent = msg; }
 
 
 function setControls(enabled) {
-  elGainInput.disabled      = !enabled;
-  elExpoInput.disabled      = !enabled;
-  elWbRedInput.disabled     = !enabled;
-  elWbBlueInput.disabled    = !enabled;
+  elGainInput.disabled       = !enabled;
+  elExpoInput.disabled       = !enabled;
+  elWbRedInput.disabled      = !enabled;
+  elWbBlueInput.disabled     = !enabled;
   elContrastInput.disabled   = !enabled;
   elSharpnessInput.disabled  = !enabled;
   elSaturationInput.disabled = !enabled;
   elBrightnessInput.disabled = !enabled;
   elNrInput.disabled         = !enabled;
   elResSelect.disabled       = !enabled;
-  elBtnSeqStart.disabled     = !enabled;
   if (document.getElementById('btn-tl-start'))
     document.getElementById('btn-tl-start').disabled = !enabled;
 }
@@ -94,9 +93,6 @@ function connect() {
     }
 
     if (msg.cmd === 'error')        setStatus('Erreur : ' + msg.detail);
-    if (msg.cmd === 'seq_frame')    _onSeqFrame(msg);
-    if (msg.cmd === 'seq_done')     _onSeqDone(msg);
-    if (msg.cmd === 'seq_error')    _onSeqError(msg);
     if (msg.cmd === 'indi_started') _onIndiStarted();
     if (msg.cmd === 'indi_stopped') _onIndiStopped();
     if (msg.cmd === 'indi_status')  _onIndiStatus(msg);
@@ -317,69 +313,6 @@ function toggleHistogram() {
 elHistBtn.addEventListener('click', toggleHistogram);
 
 window.addEventListener('resize', resizePreviewCanvas);
-
-// --- Sequence scheduler ---
-
-const elSeqGain  = document.getElementById('seq-gain');
-const elSeqExpo  = document.getElementById('seq-expo');
-const elSeqCount = document.getElementById('seq-count');
-const elBtnSeqStart      = document.getElementById('btn-seq-start');
-const elBtnSeqStop       = document.getElementById('btn-seq-stop');
-const elSeqProgressBar   = document.getElementById('seq-progress-bar');
-const elSeqProgressFill  = document.getElementById('seq-progress-fill');
-const elSeqProgressLabel = document.getElementById('seq-progress-label');
-const elSeqStatus        = document.getElementById('seq-status');
-const elSeqZipLink       = document.getElementById('seq-zip-link');
-
-attachValueInput(elSeqGain, 1, 64, () => {});
-attachValueInput(elSeqExpo, 0.1, 10000, () => {});
-
-elBtnSeqStart.addEventListener('click', () => {
-  const gain  = parseFloat(elSeqGain.value);
-  const expo  = parseFloat(elSeqExpo.value);
-  const count = Math.max(1, Math.min(100, parseInt(elSeqCount.value, 10) || 1));
-  elSeqZipLink.classList.add('hidden');
-  elSeqProgressBar.classList.remove('hidden');
-  elSeqProgressFill.style.width = '0%';
-  elSeqProgressLabel.textContent = `0 / ${count}`;
-  elBtnSeqStart.classList.add('hidden');
-  elBtnSeqStop.classList.remove('hidden');
-  elSeqStatus.textContent = 'Démarrage…';
-  send({ cmd: 'start_sequence', gain, exposure_ms: expo, count });
-});
-
-elBtnSeqStop.addEventListener('click', () => {
-  send({ cmd: 'stop_sequence' });
-  elSeqStatus.textContent = 'Arrêt en cours…';
-  elBtnSeqStop.classList.add('hidden');
-  elBtnSeqStart.classList.remove('hidden');
-});
-
-function _onSeqFrame(msg) {
-  const done  = msg.index + 1;
-  const total = msg.total;
-  const pct   = Math.round((done / total) * 100);
-  elSeqProgressFill.style.width  = pct + '%';
-  elSeqProgressLabel.textContent = `${done} / ${total}`;
-  elSeqStatus.textContent = `Capture ${done}/${total}…`;
-}
-
-function _onSeqDone(msg) {
-  elSeqProgressFill.style.width  = '100%';
-  elSeqProgressLabel.textContent = `${msg.captured} / ${msg.captured}`;
-  elSeqStatus.textContent = `Séquence terminée — ${msg.captured} image(s)`;
-  elBtnSeqStop.classList.add('hidden');
-  elBtnSeqStart.classList.remove('hidden');
-  elSeqZipLink.href = msg.zip_url;
-  elSeqZipLink.download = `minicam_seq_${msg.session}.zip`;
-  elSeqZipLink.classList.remove('hidden');
-}
-
-function _onSeqError(msg) {
-  elSeqStatus.textContent = 'Erreur : ' + msg.detail;
-  elBtnSeqStop.classList.add('hidden');
-  elBtnSeqStart.classList.remove('hidden');
-}
 
 // --- INDI mode ---
 

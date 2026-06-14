@@ -3,23 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 import subprocess
-import uuid
-from pathlib import Path
 from typing import Any
 
-import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from minicam.api.routes_capture import _unpack_raw12, _write_fits
 from minicam.api.routes_preview import start_capture_loop
 from minicam.api.routes_timelapse import run_timelapse
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-SEQ_DIR = Path("/tmp/minicam_seq")
 
 
 def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any] | None:
@@ -59,24 +52,6 @@ def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any]
         return {"cmd": "ack", "resolution": camera.resolution}
     if cmd == "status":
         return {"cmd": "status", **camera.status()}
-    if cmd == "start_sequence":
-        if app is None:
-            return {"cmd": "error", "detail": "no app context"}
-        if app.state.seq_running:
-            return {"cmd": "error", "detail": "sequence already running"}
-        if getattr(app.state, "tl_running", False):
-            return {"cmd": "error", "detail": "timelapse in progress"}
-        gain = float(msg.get("gain", camera.gain))
-        exposure_ms = float(msg.get("exposure_ms", camera.exposure_us / 1000))
-        count = max(1, min(100, int(msg.get("count", 1))))
-        app.state.seq_task = asyncio.create_task(
-            _run_sequence(camera, app, gain, exposure_ms, count)
-        )
-        return {"cmd": "ack", "detail": "sequence started", "count": count}
-    if cmd == "stop_sequence":
-        if app:
-            app.state.seq_running = False
-        return {"cmd": "ack", "detail": "stop requested"}
     if cmd == "start_indi":
         if app is None:
             return {"cmd": "error", "detail": "no app context"}
@@ -99,8 +74,6 @@ def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any]
             return {"cmd": "error", "detail": "no app context"}
         if getattr(app.state, "tl_running", False):
             return {"cmd": "error", "detail": "timelapse already running"}
-        if app.state.seq_running:
-            return {"cmd": "error", "detail": "sequence in progress"}
         if app.state.indi_mode:
             return {"cmd": "error", "detail": "INDI mode active"}
         app.state.tl_task = asyncio.create_task(run_timelapse(camera, app, msg))
@@ -117,47 +90,6 @@ def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any]
         return {"cmd": "tl_status", "running": running, "session": session}
     return {"cmd": "error", "detail": f"unknown command: {cmd}"}
 
-
-async def _run_sequence(camera: Any, app: Any, gain: float, exposure_ms: float, count: int) -> None:
-    session_id = uuid.uuid4().hex[:8]
-    session_dir = SEQ_DIR / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    app.state.seq_running = True
-    loop = asyncio.get_event_loop()
-    captured = 0
-
-    try:
-        # Apply settings once and wait for the sensor pipeline to settle (2 discarded frames)
-        await loop.run_in_executor(None, camera.apply_sequence_settings, gain, exposure_ms)
-
-        for i in range(count):
-            if not app.state.seq_running:
-                break
-            raw, meta = await loop.run_in_executor(None, camera.capture_raw)
-            fits_bytes = _write_fits(_unpack_raw12(raw), meta)
-            (session_dir / f"{i:04d}.fits").write_bytes(fits_bytes)
-            captured = i + 1
-            await _broadcast(app, {
-                "cmd": "seq_frame",
-                "index": i,
-                "total": count,
-                "url": f"/seq/{session_id}/{i}",
-                "session": session_id,
-            })
-        await _broadcast(app, {
-            "cmd": "seq_done",
-            "session": session_id,
-            "captured": captured,
-            "zip_url": f"/seq/{session_id}/zip",
-        })
-    except Exception as e:
-        log.error("Sequence error: %s", e)
-        await _broadcast(app, {"cmd": "seq_error", "detail": str(e)})
-    finally:
-        app.state.seq_running = False
-        app.state.seq_task = None
-        await loop.run_in_executor(None, camera.restore_preview_settings)
-        asyncio.create_task(_cleanup_later(session_dir, 600))
 
 
 async def _start_indi(app: Any) -> None:
@@ -231,10 +163,6 @@ async def _broadcast(app: Any, event: dict[str, Any]) -> None:
     for q in list(app.state.seq_subscribers):
         await q.put(event)
 
-
-async def _cleanup_later(path: Path, delay: int) -> None:
-    await asyncio.sleep(delay)
-    shutil.rmtree(path, ignore_errors=True)
 
 
 @router.get("/status")

@@ -208,39 +208,6 @@ class CameraController:
                 })
         return frame
 
-    def apply_sequence_settings(self, gain: float, exposure_ms: float) -> None:
-        """Apply capture settings and drain frames until the sensor confirms them."""
-        with self._lock:
-            if not self._picam2:
-                raise RuntimeError("Camera not open")
-            p = self._picam2
-            exp_us = int(max(0.1, min(30000.0, exposure_ms)) * 1000)
-            fd = self._frame_duration_us(exp_us)
-            p.set_controls({
-                "AnalogueGain": max(1.0, min(64.0, gain)),
-                "ExposureTime": exp_us,
-                "FrameDurationLimits": (fd, fd),
-            })
-        # Drain frames outside the lock — IMX290/462 pipeline latency 3-4 frames, cap 8
-        tolerance = max(500, exp_us // 20)  # 5 % tolerance
-        actual = 0
-        for attempt in range(8):
-            _, meta = p.capture_arrays(["raw"])
-            actual = meta.get("ExposureTime", 0)
-            if abs(actual - exp_us) <= tolerance:
-                log.info(
-                    "Sequence settings confirmed after %d discard(s): "
-                    "requested=%d µs actual=%d µs",
-                    attempt + 1, exp_us, actual,
-                )
-                break
-        else:
-            log.warning(
-                "Sequence settings not confirmed after 8 frames "
-                "(requested=%d µs, last actual=%d µs) — proceeding anyway",
-                exp_us, actual,
-            )
-
     def apply_timelapse_settings(self) -> None:
         """Confirm stored settings are active on the sensor (drain pipeline)."""
         with self._lock:
