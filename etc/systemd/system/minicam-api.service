@@ -1,0 +1,19 @@
+[Unit]
+Description=minicam API service (FastAPI + picamera2)
+After=network.target
+Conflicts=minicam-indi.service
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/minicam
+Environment=PYTHONPATH=/opt/minicam/src
+ExecStart=/usr/bin/python3 -m minicam
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minicam-api
+
+[Install]
+WantedBy=multi-user.target

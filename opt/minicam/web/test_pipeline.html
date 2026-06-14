@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Diagnostic</title>
+<style>
+body { font-family: monospace; background: #111; color: #eee; padding: 1rem; }
+h2 { color: #7ab; }
+.test { margin: 0.5rem 0; padding: 0.5rem; background: #1a1a1a; border-radius: 4px; border-left: 3px solid #444; }
+.test.pass  { border-left-color: #4a4; }
+.test.fail  { border-left-color: #a44; }
+.test.run   { border-left-color: #a84; }
+.test.skip  { border-left-color: #555; color: #666; }
+pre { font-size: 0.8em; color: #8ab; margin: 0.3rem 0 0 0; overflow-x: auto; }
+button { padding: 0.4rem 1rem; margin: 0.25rem; cursor: pointer; background: #2a4a6a; color: #fff; border: none; border-radius: 4px; font-size: 0.9rem; }
+button:disabled { opacity: 0.4; }
+canvas { display: block; max-width: 640px; margin: 1rem 0; border: 1px solid #444; }
+#score-chart { height: 60px; background: #0a1a0a; border: 1px solid #2a4a2a; margin: 0.5rem 0; }
+</style>
+</head>
+<body>
+<h2>Diagnostic Pipeline Lucky Stack</h2>
+<p style="font-size:0.85em;color:#888;">Ouvrir dans Chrome 113+ avec le Pi connecté. Les logs GPU apparaissent aussi dans la console (F12).</p>
+
+<div id="tests"></div>
+
+<div style="margin:1rem 0;">
+  <button id="btn-run">▶ Lancer tous les tests</button>
+  <button id="btn-stop" disabled>■ Arrêter</button>
+</div>
+
+<div style="margin:0.5rem 0;color:#8ab;font-size:0.85em;">
+  <b>Scores en temps réel :</b><br>
+  <canvas id="score-chart" width="640"></canvas>
+  <div id="score-info">—</div>
+</div>
+
+<canvas id="stack-canvas" width="640" height="360"></canvas>
+<div id="stack-info" style="font-size:0.85em;color:#8bb;">—</div>
+
+<script type="module">
+import { StreamingStacker } from './stacker.js';
+
+const WS_RAW = `ws://${location.host}/ws/raw`;
+const elTests  = document.getElementById('tests');
+const btnRun   = document.getElementById('btn-run');
+const btnStop  = document.getElementById('btn-stop');
+const canvas   = document.getElementById('stack-canvas');
+const scoreChart = document.getElementById('score-chart');
+const elScoreInfo = document.getElementById('score-info');
+const elStackInfo = document.getElementById('stack-info');
+
+let stopFlag = false;
+let stacker  = null;
+
+function addTest(id, label) {
+    const div = document.createElement('div');
+    div.className = 'test';
+    div.id = `test-${id}`;
+    div.innerHTML = `<b>${label}</b><pre id="pre-${id}">…</pre>`;
+    elTests.appendChild(div);
+    return div;
+}
+
+function pass(id, msg) {
+    const d = document.getElementById(`test-${id}`);
+    d.className = 'test pass';
+    document.getElementById(`pre-${id}`).textContent = '✓ ' + msg;
+}
+function fail(id, msg) {
+    const d = document.getElementById(`test-${id}`);
+    d.className = 'test fail';
+    document.getElementById(`pre-${id}`).textContent = '✗ ' + msg;
+}
+function run(id, msg) {
+    const d = document.getElementById(`test-${id}`);
+    d.className = 'test run';
+    document.getElementById(`pre-${id}`).textContent = '⏳ ' + msg;
+}
+
+// Score sparkline
+const scoreHistory = [];
+function addScore(score) {
+    scoreHistory.push(score);
+    if (scoreHistory.length > 200) scoreHistory.shift();
+    const ctx = scoreChart.getContext('2d');
+    const w = scoreChart.width, h = scoreChart.height;
+    ctx.clearRect(0, 0, w, h);
+    const max = Math.max(...scoreHistory, 0.01);
+    ctx.strokeStyle = '#4a8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    scoreHistory.forEach((v, i) => {
+        const x = i / (scoreHistory.length - 1) * w;
+        const y = h - (v / max) * (h - 4) - 2;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+}
+
+btnStop.addEventListener('click', () => {
+    stopFlag = true;
+    stacker?.stop();
+    stacker = null;
+    btnStop.disabled = true;
+    btnRun.disabled  = false;
+});
+
+btnRun.addEventListener('click', async () => {
+    btnRun.disabled = true;
+    btnStop.disabled = false;
+    stopFlag = false;
+    elTests.innerHTML = '';
+    scoreHistory.length = 0;
+
+    // --- T1: COOP/COEP headers ---
+    addTest('t1', 'T1 — Headers COOP/COEP');
+    run('t1', 'Vérification…');
+    try {
+        const res = await fetch('/');
+        const coop = res.headers.get('cross-origin-opener-policy');
+        const coep = res.headers.get('cross-origin-embedder-policy');
+        if (coop === 'same-origin' && coep === 'require-corp') {
+            pass('t1', `COOP=${coop}  COEP=${coep}`);
+        } else {
+            fail('t1', `COOP=${coop}  COEP=${coep}  (attendu: same-origin / require-corp)`);
+        }
+    } catch(e) { fail('t1', e.message); }
+
+    // --- T2: SharedArrayBuffer ---
+    addTest('t2', 'T2 — SharedArrayBuffer disponible');
+    if (typeof SharedArrayBuffer !== 'undefined') {
+        pass('t2', 'SharedArrayBuffer OK');
+    } else {
+        fail('t2', 'SharedArrayBuffer indisponible — COOP/COEP probablement manquants');
+    }
+
+    // --- T3: WebGPU ---
+    addTest('t3', 'T3 — WebGPU GPU adapter');
+    run('t3', 'Demande adapter…');
+    let gpuOk = false;
+    try {
+        if (!navigator.gpu) throw new Error('navigator.gpu absent');
+        let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
+        if (!adapter) throw new Error('Adapter null (pas de GPU ni SwiftShader)');
+        const device = await adapter.requestDevice();
+        const isFallback = adapter.isFallbackAdapter;
+        pass('t3', `GPU: ${adapter.info?.vendor ?? 'inconnu'} / ${adapter.info?.architecture ?? '?'} — ${isFallback ? 'SwiftShader CPU' : 'GPU natif'} — device OK`);
+        gpuOk = true;
+    } catch(e) { fail('t3', e.message + ' — workers WebGPU indisponibles'); }
+
+    if (stopFlag) return;
+
+    // --- T4: WS connexion ---
+    addTest('t4', 'T4 — WebSocket /ws/raw connexion');
+    run('t4', 'Connexion…');
+    const wsOk = await new Promise((resolve) => {
+        const ws = new WebSocket(WS_RAW);
+        ws.binaryType = 'arraybuffer';
+        const timeout = setTimeout(() => { ws.close(); resolve(false); }, 5000);
+        ws.onopen = () => { clearTimeout(timeout); ws.close(); resolve(true); };
+        ws.onerror = () => { clearTimeout(timeout); resolve(false); };
+    });
+    if (wsOk) { pass('t4', `Connexion à ${WS_RAW} établie`); }
+    else { fail('t4', `Impossible de se connecter à ${WS_RAW}`); return _done(); }
+
+    if (stopFlag) return;
+
+    // --- T5: Première frame brute ---
+    addTest('t5', 'T5 — Réception première frame /ws/raw');
+    run('t5', 'Attente frame…');
+    const firstFrame = await new Promise((resolve) => {
+        const ws = new WebSocket(WS_RAW);
+        ws.binaryType = 'arraybuffer';
+        const timeout = setTimeout(() => { ws.close(); resolve(null); }, 10000);
+        ws.onmessage = (ev) => {
+            clearTimeout(timeout);
+            ws.close();
+            try {
+                const buf = ev.data;
+                const view = new DataView(buf);
+                const jsonLen = view.getUint32(0, false);
+                const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, jsonLen)));
+                const rawOffset = 4 + jsonLen;
+                const pixOff = rawOffset % 2 === 0 ? rawOffset : rawOffset + 1;
+                const pixels = new Uint16Array(buf, pixOff);
+                resolve({ meta, pixels, totalBytes: buf.byteLength });
+            } catch(e) { resolve(null); }
+        };
+        ws.onerror = () => { clearTimeout(timeout); resolve(null); };
+    });
+
+    if (!firstFrame) { fail('t5', 'Pas de frame reçue en 10 s'); return _done(); }
+    const { meta, pixels } = firstFrame;
+    pass('t5', `${meta.width}×${meta.height}  bayer=${meta.bayer}  gain=${meta.gain?.toFixed(1)}  exp=${meta.exposure_ms?.toFixed(1)}ms  pixels=${pixels.length}  maxVal=${Math.max(...pixels.slice(0,1000))}`);
+
+    if (stopFlag) return;
+
+    // --- T6: Workers init ---
+    addTest('t6', `T6 — Init workers analyze + stack (WebGPU=${gpuOk ? 'oui' : 'non'})`);
+    run('t6', 'Init…');
+    // Seuil très bas pour le test pipeline (valider les mécanismes, pas la qualité)
+    stacker = new StreamingStacker({
+        mode: 'lucky', canvas,
+        options: { qualityThreshold: 0.001, previewEveryN: 3 },
+    });
+
+    let t6ok = false;
+    try {
+        await stacker.start(WS_RAW);
+        pass('t6', 'Workers ready, flux démarré');
+        t6ok = true;
+    } catch(e) { fail('t6', e.message); }
+
+    if (!t6ok || stopFlag) return _done();
+
+    // --- T7: Frames analysées ---
+    const N_FRAMES = 20;
+    addTest('t7', `T7 — Score Laplacian varie (${N_FRAMES} frames)`);
+    run('t7', 'Collecte des scores…');
+
+    const scores = [];
+    let accepted7 = 0;
+    await new Promise((resolve) => {
+        const listener = (ev) => {
+            const { score, accepted } = ev.detail;
+            scores.push(score);
+            if (accepted) accepted7++;
+            addScore(score);
+            elScoreInfo.textContent = `Frame ${scores.length}/${N_FRAMES} — score=${score.toFixed(4)}  acceptée=${accepted}  moy=${(scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(4)}`;
+            if (scores.length >= N_FRAMES || stopFlag) {
+                stacker.removeEventListener('frame', listener);
+                resolve();
+            }
+        };
+        stacker.addEventListener('frame', listener);
+    });
+
+    if (stopFlag) return _done();
+    const scoreMin  = Math.min(...scores).toFixed(4);
+    const scoreMax  = Math.max(...scores).toFixed(4);
+    const scoreMean = (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(4);
+    const scoreStd  = Math.sqrt(scores.reduce((a,b)=>a+(b-scoreMean)**2,0)/scores.length).toFixed(4);
+    if (parseFloat(scoreMax) - parseFloat(scoreMin) > 1e-6) {
+        pass('t7', `min=${scoreMin}  max=${scoreMax}  moy=${scoreMean}  std=${scoreStd}  — variabilité OK`);
+    } else {
+        fail('t7', `Tous les scores identiques : ${scoreMin} — pipeline analyse probablement bloqué`);
+    }
+
+    // --- T8: Frames acceptées ---
+    addTest('t8', `T8 — Frames acceptées (seuil 0.1%, ${N_FRAMES} frames)`);
+    run('t8', `${accepted7}/${N_FRAMES} acceptées`);
+    if (accepted7 >= 2) pass('t8', `${accepted7}/${N_FRAMES} acceptées — seuil pipeline OK`);
+    else fail('t8', `${accepted7}/${N_FRAMES} acceptées — vérifier le pipeline analyze`);
+
+    if (stopFlag) return _done();
+
+    // --- T9: Stack accumulation ---
+    addTest('t9', 'T9 — Accumulation stack (attendre 2 frames empilées)');
+    run('t9', 'Attente…');
+
+    await new Promise((resolve) => {
+        const listener = (ev) => {
+            elStackInfo.textContent = `Empilées: ${ev.detail.stackedCount}  Score: ${ev.detail.score.toFixed(4)}  Acceptée: ${ev.detail.accepted}`;
+            if (ev.detail.stackedCount >= 2 || stopFlag) {
+                stacker.removeEventListener('frame', listener);
+                resolve();
+            }
+        };
+        stacker.addEventListener('frame', listener);
+    });
+
+    if (!stopFlag) {
+        const sc = stacker.stackedCount;
+        if (sc >= 2) pass('t9', `${sc} frames empilées — accumulateur CPU OK`);
+        else fail('t9', `Seulement ${sc} frames empilées — vérifier le pipeline stack`);
+    }
+
+    if (stopFlag) return _done();
+
+    // --- T10: Preview canvas ---
+    addTest('t10', 'T10 — Preview canvas mis à jour');
+    run('t10', 'Attente preview…');
+
+    const previewOk = await new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve(false), 30000);
+        const listener = () => {
+            clearTimeout(timeout);
+            stacker.removeEventListener('preview', listener);
+            resolve(true);
+        };
+        stacker.addEventListener('preview', listener);
+    });
+
+    if (previewOk) {
+        const pix = canvas.getContext('2d').getImageData(0, 0, 10, 10).data;
+        const nonZero = Array.from(pix).some(v => v > 0);
+        if (nonZero) pass('t10', 'Canvas mis à jour avec des pixels non nuls — OK');
+        else fail('t10', 'Canvas mis à jour mais pixels tous nuls — problème stretch ou données');
+    } else {
+        fail('t10', 'Pas de preview après 30 s');
+    }
+
+    if (stopFlag) return _done();
+
+    // --- T11: getStackResult ---
+    addTest('t11', 'T11 — getStackResult() (snapshot GPU)');
+    run('t11', 'Lecture snapshot…');
+    try {
+        const result = await stacker.getStackResult();
+        if (result?.float32Data && result.float32Data.length > 0 && result.stackedCount > 0) {
+            const maxVal = Math.max(...result.float32Data.slice(0, 10000).filter((_,i) => i%4!==3));
+            pass('t11', `${result.stackedCount} frames  ${result.width}×${result.height}  expTotal=${result.totalExpMs.toFixed(0)}ms  gainMoy=${result.gainMean.toFixed(1)}  maxFloat=${maxVal.toFixed(3)}`);
+        } else {
+            fail('t11', `Résultat vide ou stackedCount=0  data.length=${result?.float32Data?.length}`);
+        }
+    } catch(e) { fail('t11', e.message); }
+
+    _done();
+});
+
+function _done() {
+    stacker?.stop();
+    stacker = null;
+    btnStop.disabled = true;
+    btnRun.disabled  = false;
+    const allTests = [...document.querySelectorAll('.test')];
+    const nPass = allTests.filter(d => d.classList.contains('pass')).length;
+    const nFail = allTests.filter(d => d.classList.contains('fail')).length;
+    const summary = document.createElement('div');
+    summary.style.cssText = 'margin:1rem 0;font-size:1rem;font-weight:bold;';
+    summary.textContent = `Résultat : ${nPass} passés / ${nFail} échoués sur ${allTests.length} tests`;
+    summary.style.color = nFail === 0 ? '#4d4' : '#d44';
+    elTests.prepend(summary);
+}
+</script>
+</body>
+</html>

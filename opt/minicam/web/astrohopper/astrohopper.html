@@ -1,0 +1,2441 @@
+<!DOCTYPE>
+<html>
+<head>
+<title>AstroHopper - Web Application for Sky Navigation</title>
+<link rel="manifest" href="manifest.json">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+</head>
+<script src="imu_shim.js"></script>
+<style>
+body, td { margin:3mm 0 0 0; font-size: 5mm ; color:red ; font-family: sans; background-color:black }
+a:link {color: red;}
+a:visited { color: red; }
+a:active { color:red; }
+a:hover { color:red; }
+button { border-radius:2mm; height:10mm; font-size:5mm ; text-align:center; vertical-align: middle; background-color:black; color:red; border: 2px solid red }
+.comp_but, .incdec_but { width: 10mm ; height:10mm; font-size:5mm ; padding: 0 }
+.comp_but { float:right }
+.only_tiny { display : none }
+.only_tiny_tr { display : none }
+.only_full { display : inline }
+.only_tiny_b { display : none }
+
+#search_field_main_ok {
+    position:absolute;
+    top:31mm;
+    right:10%;
+    height:10mm;
+    border:0px;
+    margin-left:1mm;
+    display:none;
+    background-color: transparent;
+}
+
+#main_search_button {
+    position:absolute;
+    right:27mm;
+    margin:0;
+    top:3mm;
+}
+
+#search_field_main {
+    position:absolute;
+    right:12mm;
+    top:3mm;
+    margin:0;
+    border-radius:2mm;
+    width:15mm;
+    padding-left:1mm;
+    font-size:66%;
+}
+
+#search_field_main:focus {
+    position:absolute;
+    right:10%;
+    left:10%;
+    top:31mm;
+    padding:0;
+    width:80%;
+    font-size:100%;
+}
+
+
+.first_line_controls {
+    padding:0;
+    margin:1mm 1mm 1mm 1mm;
+}
+
+.manual_background {
+    background: url(manual-blk.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+.compass_background {
+    background: url(compass-blk.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+.wiki_background {
+    background: url(wiki.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+.search_background {
+    background: url(search.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+.nocompass_background {
+    background: url(nocompass-blk.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+.settings_background {
+    background: url(settings-blk.png) no-repeat center center;
+    background-size: 10mm 10mm;
+}
+
+
+input[type=text], input[type=text]:focus, textarea, input[type=submit], input[type=number] {
+	border: 2px solid red;
+	color:red;
+	background-color:black;
+}
+
+
+input[type=text], input[type=text]:focus, input[type=submit], input[type=number] {
+	height:10mm;
+	font-size:5mm;
+        padding: 0;
+	vertical-align: middle; background-color:black; 
+}
+
+
+input[type=submit] { width:10mm;}
+</style>
+<body>
+<span id="rpi0-imu-dot" style="display:none;"></span>
+<a href="/" style="position:fixed;top:2px;left:50%;transform:translateX(-50%);z-index:999;color:#f88;text-decoration:none;border:1px solid #f44;border-radius:2mm;padding:1px 6px;font-size:4mm;background:transparent;">&#8592; MiniCam</a>
+<!-- Requis par translateAll() pour afficher le manuel dans la bonne langue -->
+<div id="manual_tr_en" class="manual_section" style="display:none;"></div>
+<canvas style="position:absolute; left:0; top:0; z-index:-1"  id="myCanvas" width="640" height="480"> </canvas>
+<div class="only_full">
+    <input id="search_field_main" class="search_field" autocomplete="off" type="text" value="search" onkeyup="mainSearchDoneCheck(event);" oninput="mainSearchFindTarget(this.value);" onfocus="mainSearchFocus();" onclick="mainSearchFocus();" onfocusout="mainSearchOnFocusChange(false);" onfocusin="mainSearchOnFocusChange(true)" />
+    <button class="incdec_but search_background" id="main_search_button" style="display:none; margin-right:1mm;" onclick="reShearchMain();">&nbsp;</button>
+    <button id="search_field_main_ok" ></button>
+</div>
+<p class="first_line_controls" >
+	<span class="only_full"><button class="ui_but tr" onclick="align();">Align</button></span>
+	<span class="only_tiny"><button class="incdec_but" onclick="align();">&#x25ce;</button></span>
+    <span id="countdown"></span>
+    <span class="only_tiny" id="alignment_tiny"></span><span class="only_full" id="alignment"></span> 
+	<button class="comp_but nocompass_background" id="nocompass_button" style="display:none">&nbsp;</button>
+	<button class="comp_but manual_background" id="hand_button" style="display:none;" onclick="manualMode();">&nbsp;</button>
+	<button class="comp_but compass_background" id="compass_button" style="display:none" onclick="compassMode();">&nbsp;</button>
+</p>
+<p class="first_line_controls only_full_b">
+		<button class="incdec_but" onclick="incFOV();">-</button>
+		<button class="incdec_but" onclick="decFOV();">+</button>
+		&angle;<span class="fov_val">60&deg;</span>
+		<button style="display:inline" class="comp_but settings_background" onclick="showConfig('inline');">&nbsp;</button>
+</p>
+<p class="only_tiny_b first_line_controls"><button class="comp_but settings_background" onclick="showConfig('inline');">&nbsp;</button>
+</p>
+<p class="first_line_controls" style="display:none" id="wl_ctl"><button  class="incdec_but" onclick="watchListItemUpdate(-1);">&lt;</button> <button class="incdec_but" onclick="watchListItemUpdate(1);">&gt;</button><br/><i><span id="wl_target_name"></span></i></p>
+<p class="first_line_controls" style="display:none" id="show_info">
+    <button  class="incdec_but wiki_background" onclick="showObjectInfo();" >&nbsp;</button>
+</p>
+
+<p class="first_line_controls tr" id="gps">No Geolocation</p>
+<div id="object_log" style="display:none">
+<p>Sirius:<span id="Sirius_alt"></span>, <span id="Sirius_az"></span></p>
+<p>Mars:<span id="Mars_alt"></span>, <span id="Mars_az"></span></p>
+<p>Rigel:<span id="Rigel_alt"></span>, <span id="Rigel_az"></span></p>
+<p>Jupiter:<span id="Jupiter_alt"></span>, <span id="Jupiter_az"></span></p>
+</div>
+<p class="first_line_controls" id="orient"></p>
+<p class="first_line_controls" id="status"></p>
+<div class="config_div r2l" id="quick_start" style="display:none; position:absolute; left:10%; top:10%; z-index:4 ; padding: 1% 1% 1% 1%; width: 78%; background:black; border: 1px solid red ">
+    <span style="position:absolute; right:1mm; top:1mm">
+        <button class="incdec_but" onclick="qsHide()">X</button>
+    </span>
+    <h3 class="tr" style="text-align:center" >Quick Start Guide</h3>
+    <p><input class="dso_selector" id="qs_hide_1" type="checkbox" onchange="showOnStartup(!this.checked,1)" /><label for="qs_hide_1" class="tr" >Don't show on startup</label></p>
+    <div id="qs_1">
+        <p>
+            <button class="ui_but tr" disabled style="color:#800">&lt; Prev</button>
+            <button class="ui_but tr" onclick="qsShowHide(2,1)">Next &gt;</button>
+        
+        </p>
+        <img style="float:right" width="50%" src="images/qs_1_1.png" alt="Setup" />
+        <p class="tr">Connect the smartphone to the optical tube such that its top points to the viewing direction and it lies flat on the tube.</p>
+    </div>
+    <div id="qs_2" style="display:none;">
+        <p>
+            <button class="ui_but tr" onclick="qsShowHide(1,2)">&lt; Prev</button>
+            <button class="ui_but tr" onclick="qsShowHide(3,2)">Next &gt;</button>
+        </p>
+        <img style="float:right"  width="50%" src="images/qs_2_1.png" alt="Setup" />
+        <p class="tr">Point the telescope to an easily identifiable star or planet <strong>nearby</strong> an object you want to find. For example in order to find M41 or M47, point the telescope to Sirius &mdash; this is going to be the <em>alignment star</em>.</p>
+        <p class="tr">When the telescope is pointing to the alignment star tap <button class="ui_but">Align</button> button and tap on the alignment star on the map. Once the application is aligned, it tracks the telescope movement using smartphone's sensors.</p>
+    </div>
+    <div id="qs_3" style="display:none;">
+        <p>
+            <button class="ui_but tr" onclick="qsShowHide(2,3)">&lt; Prev</button>
+            <button class="ui_but tr" onclick="qsShowHide(4,3)">Next &gt;</button>
+        </p>
+        <p class="tr">If you can't see the alignment star on the map, there may be a common compass accuracy problem.</p>
+        <p class="tr">In such a case tap on <button class="incdec_but manual_background">&nbsp;</button> to switch to manual mode and scroll the map left
+           or right till you see the alignment star.</p>
+        <p class="tr">Then tap <button class="ui_but">Align</button> and tap on the alignment star on the map as usual.</p>
+    </div>
+    <div id="qs_4" style="display:none;">
+        <p>
+            <button class="ui_but tr" onclick="qsShowHide(3,4)">&lt; Prev</button>
+            <button class="ui_but tr" disabled style="color:#800">Next &gt;</button>
+        </p>
+        <img style="float:right"  width="50%" src="images/qs_3_1.png" alt="Setup" />
+        <p class="tr">Once aligned, tap on the object you want to find (for example M41, M47) and follow the direction line on the map till you reach the target. Now you can observe the object you selected.</p>
+        <p class="tr">It is recommended to repeat alignment for each new target you want to find</p>
+        <p><span class="tr">For detailed instruction and troubleshooting please refer to the <a href="https://youtu.be/AtArqBLWWJ8">[Video&nbsp;Tutorial]</a>
+          and to the integrated manual via:</span> <button class="incdec_but settings_background">&nbsp;</button>&nbsp;&#8594;&nbsp;<button class="incdec_but">?</button>
+        </p>
+    </div>
+</div>
+<div class="config_div" id="wiki_info" style="display:none; position:absolute; left:5%; top:5%; right:5%; bottom:5%; z-index:3; padding: 1% 1% 1% 1%; background:black; border: 1px solid red ">
+    <span style="position:absolute; right:1mm; top:1mm">
+        <button class="incdec_but" onclick="hideWiki();">X</button>
+    </span>
+    <iframe id="wiki_iframe" style="width:100%; height:100%"></iframe>
+</div>
+<div class="config_div" id="allow_orientation" style="display:none; position:absolute; left:10%; top:10%; z-index:3 ; padding: 1% 1% 1% 1%; width: 78%; background:black; border: 1px solid red ; text-align:center ">
+<button class="ui_but tr" style="height:30mm" onclick="iOSOrientation();">Enable Device Orientation</button>
+</div>
+<div class="config_div" id="config" style="display:none; position:absolute; left:5%; top:5%; z-index:2 ; padding: 1% 1% 1% 1%; width: 88%; background:black; border: 1px solid red ">
+<span style="position:absolute; right:1mm; top:1mm">
+<button class="incdec_but" onclick="showManual(true)">?</button>
+<button class="incdec_but" onclick="showConfig('none');">X</button>
+</span>
+<div class="r2l">
+<p style="text-align:center"><b><span  class="tr">Settings</span> (version)</b></p>
+<p>
+<button class="ui_but" onclick="resetAll();">&#x21bb;</button>
+<input class="dso_selector" id="small_screen" type="checkbox" /><label for="small_screen" class="tr" >Small UI</label> 
+<input class="dso_selector" id="NM_checked" type="checkbox"  /><label for="NM_checked" class="tr">Night</label>
+<input class="dso_selector" id="FS_checked" type="checkbox" onchange="toggleFS(this.checked)"        /><label for="FS_checked" class="tr">Full S.</label>
+</p><p>
+<input class="dso_selector" id="SWL_checked" type="checkbox" onchange="toggleSWL(this.checked)" /><label for="SWL_checked" class="tr">Keep Screen On</label>
+</p>
+<p>
+    <select id="lang_select">
+        <option value="en">English</option>
+        <option value="fr">Français</option>
+        <option value="he">עברית</option>
+        <option value="hu">Magyar</option>
+        <option value="it">Italiano</option>
+        <option value="ru">Русский</option>
+        <option value="uk">Українська</option>
+    </select>
+</p>
+<table>
+<tr class="only_tiny_tr">
+	<td class="tr">FOV</td>
+	<td>
+		<button class="incdec_but" onclick="incFOV();">-</button> <button class="incdec_but" onclick="decFOV();">+</button>
+	</td>
+	<td>
+		&angle;<span class="fov_val">60&deg;</span>
+	</td>
+	<td>&nbsp;</td>
+</tr>
+<tr>
+	<td class="tr">Stars</td>
+	<td>
+		<button class="incdec_but" onclick="starMagUpdate(-1);">-</button> <button class="incdec_but" onclick="starMagUpdate(1);">+</button>
+	</td>
+	<td>
+		<i>m&leq;</i><span id="mag_val">4</span>
+	</td>
+	<td>&nbsp;</td>
+</tr>
+<tr>
+	<td class="tr">DSO</td>
+	<td>
+		<button class="incdec_but" onclick="dsoMagUpdate(-1);">-</button> <button class="incdec_but" onclick="dsoMagUpdate(1)">+</button>
+	</td>
+	<td>
+		<i>m&leq;</i><span id="dso_level_val">5</span>
+	</td>
+	<td>&nbsp;</td>
+</tr>
+<tr>
+	<td class="tr">List</td>
+	<td>
+		<button  class="incdec_but" onclick="prevWatchList();">&lt;</button> <button class="incdec_but" onclick="nextWatchList()">&gt;</button>
+	</td>
+	<td class="tr" id="wl_sel">None</td>
+	<td>
+		<a class="tr" id="list_edit_toggle" href="javascript:toggleEditWL()">[edit]</a>
+	</td>
+</tr>
+<tr>
+	<td class="tr">Font</td>
+	<td>
+		<button class="incdec_but" onclick="incDecLF(-1);">-</button> <button class="incdec_but" onclick="incDecLF(1)">+</button>
+	</td>
+	<td>
+		<i>+</i><span id="lf_val">0</span><i>mm</i>
+	</td>
+	<td>&nbsp;</td>
+</tr>
+</table>
+
+<div class='l2r' id="wl_edit" style="display:none;">
+	<p>name: dso1, dso2, dso3, &#x2026;</p>
+	<p>
+	    <textarea id="user_wl" style="width:80%" rows="5"></textarea>
+	</p>
+	<p><button class="ui_but tr" onclick="saveWL();" >Save</button> <button class="ui_but tr" onclick="discardWL();" >Discard</button></p>
+	<p id="wl_errors"></p>
+</div>
+<form onsubmit="return hideSettingIfSelectionOk()" >
+<p> <input id="search_field" type="text" oninput="findTargetByName(this.value)" onclick="this.value='';" onfocus="findTargetByName(this.value)" style="width:30%" /> <input type="submit" value="&#x2315;"/> <b><span style="float:right" id="find_status"><span></b></p>
+</form>
+<table style="width:100%">
+<tr>
+    <td>
+        <input class="dso_selector" id="align_dso_checked"  type="checkbox" /><label for="align_dso_checked" class="tr" >Align on DSO</label>
+    </td>
+    <td>
+        <input class="dso_selector" id="show_star_names_checked"  type="checkbox" checked="checked" onchange="global_show_star_names = this.checked;" /><label for="show_star_names_checked" class="tr" >Star Names</label>
+    </td>
+</tr>
+<tr>
+    <td>
+        <input class="dso_selector" id="Oc_checked" type="checkbox" checked="checked" /><label for="Oc_checked" class="tr">Open Clusters</label>
+    </td>
+    <td>
+        <input class="dso_selector" id="Gc_checked" type="checkbox" checked="checked" /><label for="Gc_checked" class="tr">Glob. Clusters</label>
+    </td>
+</tr>
+<tr>
+    <td>
+        <input class="dso_selector" id="Ne_checked" type="checkbox" checked="checked" /><label for="Ne_checked" class="tr">Nebulae</label>
+    </td>
+    <td>
+        <input class="dso_selector" id="Ga_checked" type="checkbox" checked="checked" /><label for="Ga_checked" class="tr">Galaxies</label>
+    </td>
+</tr>
+<tr>
+    <td>
+        <input class="dso_selector" id="P_checked"  type="checkbox" checked="checked" /><label for="P_checked"  class="tr">Planets</label>
+    </td>
+    <td>
+        <input class="dso_selector" id="Ca_checked" type="checkbox" checked="checked" /><label for="Ca_checked" class="tr">Constellations</label>
+    </td>
+</tr>
+<tr>
+    <td>
+        <input class="dso_selector" id="qs_hide_2" type="checkbox" checked="checked" onchange="showOnStartup(this.checked,2);" /><label for="qs_hide_2" class="tr">Show Tutorial</label>
+    </td>
+    <td>
+        <input class="dso_selector" id="pinch_zoom" type="checkbox" checked="checked" /><label for="pinch_zoom" class="tr">Pinch Zoom</label>
+    </td>
+</tr>
+<tr>
+    <td>
+        &nbsp;
+    </td>
+    <td>
+        <span class="tr">Wiki</span>:
+        <select id="wiki_info_opt">
+            <option value="no" class="tr">Never</option>
+            <option selected value="day" class="tr">Day Only</option>
+            <option value="always" class="tr">Always</option>
+        </select>
+    </td>
+</tr>
+</table>
+<p><input class="dso_selector" id="U_checked" type="checkbox" checked="checked" /><label for="U_checked" class="tr">User Objects</label> <a class="tr" id="edit_user_dso" href="javascript:toggleEditDSO();">[edit]</a></p>
+<div class='l2r' id="dso_edit" style="display:none;">
+<p>Name,RA(hh:mm:ss),DE(±dd:mm:ss)</p>
+<p>
+    <textarea id="user_dso" style="width:80%" rows="5"></textarea>
+</p>
+<p><button class="ui_but tr" onclick="saveUserDSO();" >Save</button> <button class="ui_but tr" onclick="discardUserDSO();" >Discard</button></p>
+<p id="dso_errors"></p>
+</div>
+<hr>
+<div class="l2r">
+    <p><button class="incdec_but" onclick="requestGeolocation();">&#x21bb;</button> GPS: <span id="lat">Unknown</span>, <span id="lon">Unknown</span></p>
+    <p>&#x03B1;=<span id="ang_a"></span> &#x03B2;=<span id="ang_b"></span> &#x03B3;=<span id="ang_g"></span> C=<span id="ang_c"></span> UTC=<span id="utc_time"></span></p>
+</div>
+<table>
+<th><td colspan="2" style="text-align:left" class="tr">GPS Override</td></th>
+<tr><td class="tr">Lat:</td><td><input type="number" min="-90" max=90" value="" id="manual_lat" oninput="updateManualLatLon()"></td></tr>
+<tr><td class="tr">Lon:</td><td><input type="number" min="-180" max=180" value="" id="manual_lon" oninput="updateManualLatLon()"></td></tr>
+</table>
+</div> <!-- RTL div -->
+</div>
+
+<div style="position:absolute; left:0; top:0; z-index:5; width:100%; background:black; display:none;" id="manual">
+<span style="float:right; margin-right: 2mm; margin-top:2mm">
+<button class="incdec_but" onclick="showManual(false);">X</button>
+</span>
+MANUAL
+</div>
+
+<script src="vsop87a_combined.js"></script>
+<script src="po/messages.js"></script>
+<script src="vsop87-multilang/Languages/JavaScript/CelestialProgrammingReduce.js"></script> 
+<script>
+vsop87a_full = vsop87a_xsmall;
+vsop87a_full_velocities = vsop87a_milli_velocities;
+</script>
+<script src="jsdb.js"></script>
+<script>
+
+var g_original = null;
+
+var global_day_style = {
+	cross 		: 'blue',
+	constelations 	: 'yellow',
+	bearing 	: 'green',
+	star		: 'white',
+	altaz		: 'red',
+	target		: 'cyan',
+	align		: 'magenta'
+};
+
+var global_show_obj = {
+	'S': true,
+	'Oc': true,
+	'Gc': true,
+	'Ca': true,
+	'Ga':true,
+	'Ne':true,
+   	'P': true,
+    'U': true
+};
+
+var global_night_style = {
+	cross 		: 'red',
+	constelations 	: '#880000',
+	bearing 	: 'red',
+	star		: 'red',
+	altaz		: 'red',
+	target		: 'red',
+	align		: '#AA0000'
+};
+
+
+
+var global_style = global_day_style;
+
+var global_align_on_dso=false;
+var global_show_star_names=true;
+var global_targets_list = [];
+var global_prev_xy=null;
+var global_start_zoom_size = null;
+var global_start_zoom = null;
+var global_allow_pinch_zoom = true;
+var global_toch_start_time = null;
+var global_target_index = -1;
+var global_align_index = -1;
+var global_expecting_select = null;
+var global_camera_projection = true;
+var global_expected_frame_rate_ms = 66;
+var global_use_compass = false;
+var global_dso_mag = parseInt(document.getElementById('dso_level_val').innerHTML);
+var global_large_font = 0;
+var global_lang = 'en';
+var global_fov_values = [7,15,30,60,90,120,150]
+var global_fov = 60;
+var global_mag = 4;
+var gdata = {
+	"lat" : 31.9,
+	"lon" : 34.8,
+	"compass_alpha" : 0,
+	"alpha" : 0,
+	"alpha_user_offset" : 0,
+	"alpha_gyro" : 0,
+	"alpha_diff" : 0,
+	"beta" : 0,
+	"gamma" : 0,
+	"time" : Date.now(), //1614716453109
+}
+
+var global_align_matrix = [1,0,0,0,1,0,0,0,1];
+var global_use_gyro = false;
+var global_full_screen = false;
+
+var global_status = "";
+
+var global_watchlist = null;
+
+function showManual(v)
+{
+	document.getElementById('manual').style.display = v ? 'inline' : 'none';
+}
+
+
+function qsHide()
+{
+    document.getElementById('quick_start').style.display = 'none';
+}
+
+function qsShowHide(show_id,hide_id)
+{
+    document.getElementById('qs_' + hide_id).style.display = 'none';
+    document.getElementById('qs_' + show_id).style.display = 'inline';
+}
+
+function setDisplayByClass(cls,value)
+{
+	var el = document.getElementsByClassName(cls);
+	for(var i=0;i<el.length;i++) {
+		el[i].style.display = value;
+	}
+}
+
+function smallScreen(v)
+{
+	var tiny = v ? 'inline' : 'none';
+	var tiny_tr = v ? 'table-row' : 'none';
+	var tiny_b = v ? 'block' : 'none';
+	var full = v ? 'none' : 'inline';
+	var full_b = v ? 'none' : 'block';
+	setDisplayByClass('only_tiny_tr',tiny_tr);
+	setDisplayByClass('only_tiny',tiny);
+	setDisplayByClass('only_tiny_b',tiny_b);
+	setDisplayByClass('only_full',full);
+	setDisplayByClass('only_full_b',full_b);
+}
+
+
+function showStatus(v)
+{
+	global_status += v+"<br/>"
+	document.getElementById('status').innerHTML = global_status;
+}
+
+function showConfig(v)
+{
+	document.getElementById('config').style.display = v;
+}
+
+
+function largeF(n,s)
+{
+    return (s+global_large_font) + "mm " +n;
+}
+
+function toggleFS(fs)
+{
+	if(fs) {
+		document.documentElement.requestFullscreen({navigationUI:'hide'});
+	}
+	else {
+		document.exitFullscreen();
+	}
+}
+
+let wakeLock = null;
+
+async function toggleSWL(swl) {
+  try {
+    if (swl) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    } else if (wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (err) {
+    console.error(`${err.name}, ${err.message}`);
+  }
+}
+
+
+function hideSettingIfSelectionOk()
+{
+	var value = document.getElementById("search_field").value;
+	if(findTargetByName(value)) {
+		showConfig('none')
+	}
+	return false;
+}
+
+function normalizeName(name)
+{
+    name = name.toUpperCase()
+    const re=/^(.*)(([A-Z]+)[ 0]+)([^0].*)$/;
+    var match = name.match(re);
+    if(match) {
+        return normalizeName(match[1]+match[3]+match[4]);
+    }
+    return name;
+}
+
+function reShearchMain()
+{
+    findTargetByName(document.getElementById('search_field_main').value);
+}
+
+function mainSearchOnFocusChange(val)
+{
+    if(!val) {
+        var isOk = document.getElementById('search_field_main_ok');
+        isOk.style.display = 'none';
+        var el =  document.getElementById('search_field_main');
+        var content = el.value;
+        reShearchMain();
+        if(content.trim()=='') {
+            el.value=_tr("search");
+        }
+    }
+    var but = document.getElementById('main_search_button');
+    if(!val && global_target_index >= 0) {
+        but.style.display='inline';
+    }
+    else {
+        but.style.display='none';
+    }
+}
+
+function mainSearchOnSubmit()
+{
+    document.getElementById('search_field_main').blur();
+    return false;
+}
+
+function mainSearchDoneCheck(e)
+{
+    if(e.key == "Enter") {
+        mainSearchOnSubmit();
+    }
+}
+function mainSearchFindTarget(name)
+{
+    findTargetByName(name.trim());
+    var el = document.getElementById('search_field_main');
+    var isOk = document.getElementById('search_field_main_ok');
+    isOk.style.display = 'inline';
+    isOk.innerHTML= (global_target_index>=0) ? "✓" : "✗";;
+}
+function mainSearchFocus()
+{
+    document.getElementById('search_field_main').value="";
+    event.stopPropagation();
+}
+
+function findTargetByName(name ='')
+{
+	var found = document.getElementById('find_status')
+	var name = normalizeName(name);
+	var N=allstars_index_name.names.length;
+	var found_index = -1;
+	if(name != '') {
+		for(var i=0;i<N;i++) {
+			let candidate = allstars_index_name.names[i];
+			if(candidate == name) {
+				found_index = i;
+				break;
+			}
+			else if(found_index != -2 && candidate.startsWith(name)) {
+				if(found_index == -1) {
+					found_index = i;
+				}
+				else {
+					found_index = -2;
+				}
+			}
+		}
+	}
+	if(found_index >= 0) {
+		global_target_index = allstars_index_name.index[found_index];
+		found.innerHTML = allstars[global_target_index].name;
+        showHideInfoIcon();
+		return true;
+	}
+	else {
+		global_target_index = -1;
+		found.innerHTML = '';
+        showHideInfoIcon();
+		return false;
+	}
+}
+
+function starMagUpdate(offset)
+{
+	global_mag += offset;
+    global_mag = Math.max(1,Math.min(6,global_mag));
+	updateMAG()
+}
+function updateMAG()
+{
+	document.getElementById("mag_val").innerHTML = global_mag + "";
+    saveMagVal(global_mag,"mag_val");
+}
+
+function incFOV()
+{
+    var N = global_fov_values.length;
+    for(var i=0;i<N-1;i++) {
+        if(global_fov == global_fov_values[i]
+           || (global_fov_values[i] < global_fov && global_fov < global_fov_values[i+1]))
+        { 
+            global_fov = global_fov_values[i+1];
+            break;
+        }
+    }
+	updateFOV()
+}
+function decFOV()
+{
+    var N = global_fov_values.length;
+    for(var i=N-1;i>0;i--) {
+        if(global_fov == global_fov_values[i]
+           || (global_fov_values[i-1] < global_fov && global_fov < global_fov_values[i]))
+        { 
+            global_fov = global_fov_values[i-1];
+            break;
+        }
+    }
+	updateFOV();
+}
+function updateFOV()
+{
+	var vals = document.getElementsByClassName("fov_val");
+	for(var i=0;i<vals.length;i++) {
+		vals[i].innerHTML = global_fov + "&deg;";
+	}
+}
+
+function setUseGyro(val,message=null,message_tiny=null)
+{
+	global_use_gyro = val;
+	if(message) {
+		var status = message;
+	}
+	else {
+		var status= global_use_gyro ? _tr("Aligned") : _tr("Not Aligned");
+	}
+	if(message_tiny) {
+		var status_t = message_tiny;
+	}
+	else {
+		var status_t = global_use_gyro ? "✓" : "✗";
+	}
+	document.getElementById("alignment").innerHTML = status;
+	document.getElementById("alignment_tiny").innerHTML = status_t;
+}
+
+function resetAll()
+{
+	global_expecting_select = selectTarget;
+	findTargetByName();
+	global_target_index = -1;
+    showHideInfoIcon();
+	document.getElementById('find_status').innerHTML = '';
+	global_align_index = -1;
+	setUseGyro(false);
+}
+
+function align()
+{
+	if(global_expecting_select == doNothing)
+		return;
+	/// realign in manual mode
+	if(global_use_gyro && !global_use_compass) {
+		// keep bearing
+		gdata.alpha_user_offset = gdata.alpha_gyro + gdata.alpha_diff - gdata.alpha;
+	}
+	setUseGyro(false,_tr("Select Star"),"?");
+	global_align_index = -1;
+	global_expecting_select = selectAlignWithTimer;
+}
+
+function normV(v)
+{
+	var len = Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+	return [v[0]/len,v[1]/len,v[2]/len];
+}
+
+function matMul(A,B)
+{
+	var v1 = mvec(A,[B[0],B[3],B[6]]);
+	var v2 = mvec(A,[B[1],B[4],B[7]]);
+	var v3 = mvec(A,[B[2],B[5],B[8]]);
+	return [v1[0],v2[0],v3[0],
+		v1[1],v2[1],v3[1],
+		v1[2],v2[2],v3[2]];
+}
+
+function matAdd(A,alpha,B,beta)
+{
+	var res = [];
+	for(var i=0;i<9;i++) {
+		res.push(A[i]*alpha + B[i]*beta);
+	}
+	return res;
+}
+
+function matEye()
+{
+	return [1,0,0, 0,1,0, 0,0,1];
+}
+
+function doNothing(index)
+{
+}
+
+function selectAlignWithTimer(index,start_val=3)
+{
+	var cd = document.getElementById("countdown");
+	global_align_index = index;
+	global_expecting_select = doNothing;
+	if(start_val <= 0) {
+		cd.innerHTML="";
+		selectAlign(index);
+	}
+	else {
+        document.getElementById("alignment").innerHTML = '';
+        document.getElementById("alignment_tiny").innerHTML = '';
+		cd.innerHTML = start_val.toFixed(1) + "s";
+		setTimeout(function() {
+			selectAlignWithTimer(index,start_val - 0.1);
+		},100);
+	}
+}
+
+function selectAlign(index)
+{
+	var camRays =  getCameraRays();
+	var st = allstars[index];
+	var tr = rayFromPos(st.RA,st.DE);
+	var fw = camRays[2];
+	var left = camRays[1];
+	var dAZ = Math.asin(crossProd(normV([tr[0],tr[1],0]),normV([fw[0],fw[1],0]))[2]);
+	var dAlt = Math.asin(tr[2]) - Math.asin(fw[2]);
+	// rotate around AZ axis
+	var daz_mat =  [  Math.cos(dAZ), Math.sin(dAZ), 0,
+			 -Math.sin(dAZ), Math.cos(dAZ), 0,
+			 0,		 0,		1];
+	// rotate around up/dwn - axis of the camera
+	var u0 = left[0];
+	var u1 = left[1];
+	var u2 = left[2];
+	var W = [ 0, -u2, u1,   u2, 0, -u0,  -u1, u0, 0 ]
+	var dalt_mat = matAdd(matEye(),1,W,Math.sin(-dAlt));
+	dalt_mat = matAdd(dalt_mat,1,matMul(W,W),2*Math.sin(-dAlt/2)*Math.sin(-dAlt/2));
+	
+	//global_align_matrix = daz_mat;
+	global_align_matrix = matMul(daz_mat,dalt_mat); 
+	
+	setUseGyro(true);
+	gdata.alpha_diff = (gdata.alpha + gdata.alpha_user_offset) - gdata.alpha_gyro;
+	global_align_index = index;
+	global_expecting_select = selectTarget;
+}
+
+/// rotation matrix is 
+/// taken from https://www.w3.org/TR/2016/CR-orientation-event-20160818/#worked-example-2
+
+var degtorad = Math.PI / 180; // Degree-to-Radian conversion
+
+
+function getRotationMatrix( alpha, beta, gamma ) {
+
+  var _x = beta  ? beta  * degtorad : 0; // beta value
+  var _y = gamma ? gamma * degtorad : 0; // gamma value
+  var _z = alpha ? alpha * degtorad : 0; // alpha value
+
+  var cX = Math.cos( _x );
+  var cY = Math.cos( _y );
+  var cZ = Math.cos( _z );
+  var sX = Math.sin( _x );
+  var sY = Math.sin( _y );
+  var sZ = Math.sin( _z );
+
+  //
+  // ZXY rotation matrix construction.
+  //
+
+  var m11 = cZ * cY - sZ * sX * sY;
+  var m12 = - cX * sZ;
+  var m13 = cY * sZ * sX + cZ * sY;
+
+  var m21 = cY * sZ + cZ * sX * sY;
+  var m22 = cZ * cX;
+  var m23 = sZ * sY - cZ * cY * sX;
+
+  var m31 = - cX * sY;
+  var m32 = sX;
+  var m33 = cX * cY;
+
+  return [
+    m11,    m12,    m13,
+    m21,    m22,    m23,
+    m31,    m32,    m33
+  ];
+
+};
+
+function mvec(m,v)
+{
+	return [ m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+		 m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+		 m[6] * v[0] + m[7] * v[1] + m[8] * v[2] ];
+}
+
+function crossProd(a,b)
+{
+	return [ a[1]*b[2] - a[2]*b[1],
+		 a[2]*b[0] - a[0]*b[2],
+		 a[0]*b[1] - a[1]*b[0] ];
+}
+
+function getCameraRays()
+{
+	// zxy
+	// after Mul comonents are [S,E,D]
+	var alpha = global_use_gyro ? gdata.alpha_gyro + gdata.alpha_diff : gdata.alpha + gdata.alpha_user_offset;
+	var M = getRotationMatrix(alpha,gdata.beta,gdata.gamma);
+	//var top = mvec(M,[1,0,0]);
+	//var lft = mvec(M,[0,1,0]);
+	//var fwd = mvec(M,[0,0,-1]);
+	
+	
+
+	var fwd = mvec(M,[0,1,0]);
+
+	// make sure left  is horizontal
+
+	var fwd_hlen = Math.sqrt(fwd[0]*fwd[0] + fwd[1]*fwd[1])
+	var fwd_hor = [fwd[0]/fwd_hlen,fwd[1]/fwd_hlen,0.0];
+
+	var lft = [-fwd_hor[1],fwd_hor[0],0.0]
+	var top = crossProd(fwd,lft);
+
+	if(global_use_gyro) {
+		return [
+			mvec(global_align_matrix,top),
+			mvec(global_align_matrix,lft),
+			mvec(global_align_matrix,fwd)
+		];
+	}
+	else {
+		return [top,lft,fwd];
+	}
+}
+
+function rayFromPos(RAd,DEd)
+{
+	var deg2rad = Math.PI / 180;
+	RA = RAd * deg2rad;
+	DE = DEd * deg2rad;
+	var jd = gdata.time * 1e-3 / 86400.0 + 2440587.5;
+	var tu = jd - 2451545.0;
+	var angle = Math.PI * 2 * (0.7790572732640+1.00273781191135448 * tu);
+	var q = angle + gdata.lon*deg2rad;
+	var H = q - RA;
+	
+	var f = deg2rad * gdata.lat;
+
+	var az_y = Math.sin(H);
+	var az_x = (Math.cos(H) * Math.sin(f) - Math.tan(DE) * Math.cos(f));
+	var az = Math.atan2(az_y,az_x)
+	var sinH = Math.sin(f) * Math.sin(DE) + Math.cos(f) * Math.cos(DE) * Math.cos(H);
+	var hz = Math.asin(sinH)
+	var ray_n = -Math.cos(az) * Math.cos(hz);
+	var ray_e = -Math.sin(az) * Math.cos(hz);
+	var ray_u = Math.sin(hz);
+	return [ ray_e, ray_n, ray_u ];
+}
+
+function sprod(v1,v2)
+{
+	return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2];
+}
+
+function cameraBearing(RAd,DEd,cameraRays)
+{
+	var ray = rayFromPos(RAd,DEd);
+	var top = cameraRays[0];
+	var lft = cameraRays[1];
+	var fwd = cameraRays[2];
+	var x = -sprod(lft,ray);
+	var y = sprod(top,ray);
+	var z = sprod(fwd,ray);
+	return {"x":x,"y":y,"z":z};
+}
+
+function getFOV()
+{
+	var ratio = canvas.width / canvas.height;
+	var fov_td,fov_lr;
+	if(ratio < 1) {
+		fov_td = global_fov;
+		fov_lr = fov_td * ratio;
+	}
+	else {
+		fov_lr = global_fov;
+		fov_td = fov_lr / ratio;
+	}
+	return {"lr":fov_lr,"td":fov_td};
+}
+
+
+function xyzTo2d(xyz,in_fov=true)
+{
+	var deg2rad = Math.PI / 180;
+	var fov = getFOV();
+	var fov_td = fov.td * deg2rad / 2;
+	var fov_lr = fov.lr * deg2rad / 2;
+	var x=xyz.x; var y=xyz.y;  var z=xyz.z;
+
+	if(z<=0)
+		return null;
+	if(global_camera_projection) {
+		var lim_x = Math.sin(fov_lr);
+		var lim_y = Math.sin(fov_td);
+	}
+	else {
+		x = Math.asin(x);
+		y = Math.asin(y)
+		var lim_x = fov_lr;
+		var lim_y = fov_td;
+
+	}
+	if(in_fov) {
+		if(x < -lim_x || x > lim_x)
+			return null;
+		if(y < -lim_y || y > lim_y)
+			return null;
+	}
+	return { x:(x + lim_x) / (lim_x*2), y: 1 - (y + lim_y) / (lim_y * 2) };
+}
+function projectToCamera(RAd,DEd,cameraRays,in_fov=true)
+{
+	var xyz = cameraBearing(RAd,DEd,cameraRays)
+	return xyzTo2d(xyz,in_fov);
+}
+
+function formatSize(arcmin)
+{
+	var res = '';
+	const lim_factor = 3;
+	if(arcmin >= 60) {
+		var deg = Math.floor(arcmin / 60);
+		res += deg + "°";
+		var m = Math.floor(arcmin - deg * 60);
+		if(arcmin < 60 * lim_factor && m != 0) {
+			res += m + "′";
+		}
+	}
+	else if(arcmin >= 1) {
+		var m = Math.floor(arcmin);
+		res += m + "′";
+		var s = Math.floor((arcmin - m)*60)
+		if(arcmin < 1 * lim_factor && s != 0) {
+			res += s + "″";
+		}
+	}
+	else {
+		res = Math.floor(arcmin * 60) + "″";
+	}
+	return res;
+}
+
+function plotStar(star,camRays,highlight)
+{
+	var pos = projectToCamera(star.RA,star.DE,camRays);
+	if(!pos)
+		return null;
+	context.beginPath();	
+	var size = star.t == 'S' ? 6.5 - star.AM : 6 ;
+	if(size < 1)
+		size = 1;
+	var color;
+	if(highlight >= 2) {
+		color = highlight == 3 ? global_style.target : global_style.align;
+		size = 10;
+	}
+	else {
+		color = global_style.star;
+	}
+	if(star.t == 'S')
+		context.fillStyle = color;
+	else
+		context.fillStyle = 'black';
+	var pix_x = pos.x * canvas.width;
+	var pix_y = pos.y * canvas.height;
+	result = { x: pix_x, y:pix_y , index:-1};
+	if(highlight == 0)
+		return result;
+	if(star.t != 'Ca') {
+		context.strokeStyle = color;
+		context.lineWidth = 1;
+		if(star.t == 'Ga') {
+			context.ellipse(pix_x,pix_y,size*1.5,size/1.5,Math.PI/4,0,2*Math.PI,false);
+			context.fill();
+			context.stroke();
+			context.beginPath();	
+			context.arc(pix_x,pix_y,size/3,0,2*Math.PI,false);
+			context.fillStyle = color;
+			context.fill();
+			context.stroke();
+		}
+		else if(star.t == 'Gc') {
+			context.lineWidth = 2;
+			context.setLineDash([1,3])
+			context.arc(pix_x,pix_y,size,2*Math.PI,false);
+			context.stroke();
+			context.beginPath();	
+			context.setLineDash([])
+			context.fillStyle = color;
+			context.arc(pix_x,pix_y,size/3,0,2*Math.PI,false);
+			context.fill();
+			context.stroke();
+		}
+		else if(star.t == 'Oc') {
+			context.lineWidth = 2;
+			context.setLineDash([1,3])
+			context.arc(pix_x,pix_y,size,2*Math.PI,false);
+			context.stroke();
+			context.beginPath();	
+			context.setLineDash([1,3])
+			context.arc(pix_x,pix_y,size/3,0,2*Math.PI,false);
+			context.fill();
+			context.stroke();
+			context.setLineDash([])
+		}
+		else if(star.t == 'Ne') {
+			context.lineWidth = 1;
+			context.moveTo(pix_x - size,pix_y - size);
+			var f = 4;
+			context.bezierCurveTo(pix_x + f*size,pix_y - size,pix_x -f*size,pix_y + size,pix_x+size,pix_y + size)
+			context.stroke();
+			context.beginPath();
+			context.fillStyle=color;
+			context.arc(pix_x,pix_y,size/3,0,2*Math.PI,false);
+			context.fill();
+			context.stroke();
+		}
+		else if(star.t == 'U') {
+			context.lineWidth = 2;
+			context.beginPath();	
+			context.moveTo(pix_x-size,pix_y);
+			context.lineTo(pix_x,pix_y+size);
+			context.lineTo(pix_x+size,pix_y);
+			context.lineTo(pix_x,pix_y-size);
+			context.lineTo(pix_x-size,pix_y);
+			context.fillStyle = 'black';
+			context.fill();
+			context.stroke();
+		}
+		else {
+			context.arc(pix_x,pix_y,size,0,2*Math.PI,false);
+			context.fill();
+			context.stroke();
+		}
+	}
+	if(star.name || highlight >= 2) {
+		if(star.t == 'Ca') {
+			color = global_style.constelations;
+		}
+		context.strokeStyle = color;
+		context.fillStyle = color;
+		if(star.t == 'Ca') {
+			context.font = largeF('Sans',4);
+			context.textBaseline = 'middle';
+			context.textAlign = 'center';
+			context.fillText(star.name,pix_x,pix_y)
+		}
+		else {
+			let text = star.name ? star.name : '';
+            if(star.t == 'S' && !global_show_star_names && highlight < 3)
+                text = '';
+			let text_extra = [];
+            let name_extra = [];
+			if(highlight > 1) {
+				context.font = largeF("Sans",6);
+				if(highlight == 3) {
+					if(star.AM != -1)
+						text_extra.push("m=" + star.AM.toFixed(1));
+					if(star.s) {
+						text_extra.push(formatSize(star.s));
+					}
+                    if('n2' in star) {
+                        name_extra = star.n2;
+                    }
+				}
+			}
+			else {
+				context.font = largeF("Sans",3);
+			}
+			context.textBaseline = 'bottom';
+			context.textAlign = 'start';
+			context.fillText(text,pix_x + size + 1,pix_y - size - 1)
+			if(text_extra) {
+				context.textBaseline = 'top';
+				context.fillText(text_extra.join(', '),pix_x + size + 1,pix_y - size/2 - 1)
+				context.textBaseline = 'bottom';
+			}
+            if(name_extra) {
+				context.textBaseline = 'top';
+				context.fillText(name_extra.join(', '),pix_x + size + 1,pix_y + 2 * size - 1)
+				context.textBaseline = 'bottom';
+            }
+		}
+	}
+	return result;
+}
+
+function plotLines(camRays)
+{
+	if(!global_show_obj.Ca)
+		return;
+	for(var i=0;i<constellation_lines.length;i++) {
+		line = constellation_lines[i];
+		var p1 = projectToCamera(line.r0,line.d0,camRays,false);
+		var p2 = projectToCamera(line.r1,line.d1,camRays,false);
+		if(!p1 || !p2)
+			continue;
+		context.beginPath();	
+		context.strokeStyle = global_style.constelations;
+		context.lineWidth = 1;
+		context.moveTo(p1.x*canvas.width,p1.y*canvas.height);
+		context.lineTo(p2.x*canvas.width,p2.y*canvas.height);
+		context.stroke();
+	}
+}
+
+
+function plotCross()
+{
+	context.strokeStyle = global_style.cross;
+	context.fillStyle = global_style.cross;
+	context.lineWidth = 3;
+	var dirs = [[1,0],[0,1],[-1,0],[0,-1]];
+	var length = 50;
+	var offset =10;
+	for(var i=0;i<dirs.length;i++) {
+		context.moveTo(canvas.width/2 + offset*dirs[i][0],canvas.height/2 + offset*dirs[i][1]);
+		context.lineTo(canvas.width/2 + length*dirs[i][0],canvas.height/2 + length*dirs[i][1]);
+	}
+	context.stroke();
+}
+
+function plotBearing(xyz)
+{
+	context.beginPath();
+	context.strokeStyle = global_style.bearing;
+	context.fillStyle = global_style.bearing;
+	context.lineWidth = 5;
+	context.arc(canvas.width/2,canvas.height/2,10,0,2*Math.PI,false);
+	context.moveTo(canvas.width/2,canvas.height/2);
+	var dx = xyz.x;
+	var dy = -xyz.y;
+	var r = 1 / Math.sqrt(dx*dx+dy*dy);
+	dx = dx*r;
+	dy = dy*r;
+	var length = 100;
+	var pos = xyzTo2d(xyz);
+	if(pos) {
+		var px = canvas.width * (pos.x - 0.5); 
+		var py = canvas.height * (pos.y - 0.5);
+		var dist = Math.sqrt(px*px + py*py);
+		if(dist < length)
+			length = dist;
+	}
+	context.lineTo(canvas.width/2 + dx * length,canvas.height/2 + dy * length);
+	var updn = (dy > 0 ? 'Down' : 'Up' ) + ' ' + Math.abs(Math.atan2(-xyz.y,xyz.z) / Math.PI * 180).toFixed(1) + '\u00b0';
+	var left = (dx > 0 ? 'Right' : 'Left' ) + ' ' + Math.abs(Math.atan2(xyz.x,xyz.z) / Math.PI * 180).toFixed(1) + '\u00b0';
+	context.stroke();
+	context.lineWidth = 0;
+	context.font = largeF('Serif',6);
+	context.strokeStyle = global_style.bearing;
+	context.fillStyle = global_style.bearing;
+	context.textBaseline = 'middle';
+	context.textAlign = 'end';
+	context.fillText(updn,canvas.width - 5,canvas.height / 2)
+	context.textAlign = 'center';
+	context.textBaseline = 'bottom';
+	context.fillText(left,canvas.width/2,canvas.height - 5)
+}			
+
+
+function logObject(thestar)
+{
+	if(thestar.name == 'Sirius' || thestar.name == 'Mars' || thestar.name == 'Jupiter' || thestar.name == 'Rigel') {
+		document.getElementById('object_log').style.display='inline';
+		if(1) {
+			let ray = rayFromPos(thestar.RA,thestar.DE);
+			let alt = Math.asin(ray[2]) / Math.PI * 180
+				let az  = Math.atan2(ray[0],ray[1]) / Math.PI * 180;
+			if(az < 0)
+				az += 360;
+			formatLatLon(thestar.name+"_alt",alt,'+','-');
+			formatLatLon(thestar.name+"_az",az,'+','-');
+		}
+		else{
+			let alt = thestar.RA / 15;
+			let az  = thestar.DE;
+			formatLatLon(thestar.name+"_alt",alt,'','-');
+			formatLatLon(thestar.name+"_az",az,'+','-');
+		}
+	}
+}
+
+
+function getSolarSystemObject(p)
+{
+    var r2d = 180 / Math.PI;
+    var d2r = Math.PI / 180;
+    var rLat = gdata.lat * d2r;
+    var rLon = gdata.lon * d2r;
+    var date = new Date();
+    // actually same
+    //var jd = gdata.time * 1e-3 / 86400.0 + 2440587.5;
+    var date = new Date();
+    var jd = JulianDate.gregorianDateToJulianDate(date.getUTCFullYear(),date.getUTCMonth()+1,date.getUTCDate(),date.getUTCHours(),date.getUTCMinutes(),date.getUTCSeconds());
+    var body = CPReduce.bodies.indexOf(p);
+    var res =  CPReduce.reduce(body,jd,[rLat,rLon,0]);
+    var RA = res[0];
+    var DEC = res[1];
+
+	return { "RA" : RA * r2d, "DE": DEC *r2d, "name": p, "AM" : -1 };
+}
+
+
+function updateDebugTime(v)
+{
+    var mins=Math.floor(v / 60000);
+    var h = Math.floor(mins / 60) % 24
+    var m = mins % 60;
+    document.getElementById('utc_time').innerHTML = ('' + h).padStart(2,'0') + ':' + (m+'').padStart(2,'0')
+
+}
+
+function validAlignType(t)
+{
+    if(!global_align_on_dso)
+        return t=='S' || t=='P';
+    return t!='Ca';
+}
+
+function plotStars()
+{
+	var start=Date.now();
+	
+	if(canvas.width != document.body.clientWidth || canvas.height != document.body.clientHeight) {
+		canvas.width = document.body.clientWidth;
+		canvas.height = document.body.clientHeight;
+	}
+	
+	global_targets_list=[];
+	gdata.time = Date.now();
+    updateDebugTime(gdata.time);
+	var camRays = getCameraRays();
+	context.fillStyle = "black";
+	context.fillRect(0, 0, canvas.width, canvas.height);
+	context.fillStyle = global_style.star;
+
+	for(var i=0;i<allstars.length;i++) {
+		var st = allstars[i].t;
+		
+		if(st == 'P') {
+		    let pos = getSolarSystemObject(allstars[i].name);
+		    allstars[i].RA = pos.RA;
+		    allstars[i].DE = pos.DE;
+		}
+		
+		//logObject(allstars[i]);
+		
+		var mag = allstars[i].AM;
+		if((st == 'S' && mag > global_mag) || (st != 'S' && mag > global_dso_mag) || !global_show_obj[st])
+		{
+			i=allstars_index[st] - 1;
+			continue
+		}
+		var highlight = 1;
+		if(i == global_target_index || i == global_align_index)
+			highlight = 0;
+		var  pos = plotStar(allstars[i],camRays,highlight);
+		// select only stars if not aligned
+		// if aligned select all but constellations
+		var waiting_for_align = global_expecting_select == selectAlignWithTimer;
+		if(pos && st!='Ca' && (validAlignType(st) || !waiting_for_align)) {
+			pos.index = i;
+			global_targets_list.push(pos);
+		}
+	}
+	if(global_align_index >= 0 && global_align_index != global_target_index) {
+		plotStar(allstars[global_align_index],camRays,2);
+	}
+	if(global_target_index >= 0) {
+		var star = allstars[global_target_index];
+		var xyz = cameraBearing(star.RA,star.DE,camRays);
+		plotBearing(xyz);
+		var target_pos = plotStar(star,camRays,3);
+        // handle a case were target < mag but it is valid align target
+        // ususally it means it is shown due to search
+        if(target_pos && validAlignType(star.t)) {
+            target_pos.index = global_target_index;
+            var found = false;
+            for(var i=0;i<global_targets_list.length;i++) {
+                if(global_targets_list[i].index == target_pos.index) {
+                    found = true;
+                    break;
+                }
+            }
+            if(!found) {
+                global_targets_list.push(target_pos);
+            }
+
+        }
+	}
+	else if(global_use_gyro) {
+		plotCross();
+	}
+	plotLines(camRays);
+	plotAltAz(camRays[2]);
+	var passed = Date.now() - start;
+	if(passed > global_expected_frame_rate_ms / 2) {
+		setTimeout(plotStars,global_expected_frame_rate_ms);
+	}
+	else {
+		setTimeout(plotStars,global_expected_frame_rate_ms-passed);
+	}
+}
+
+
+function plotAltAz(fwd)
+{
+	var alt = Math.asin(fwd[2]) / Math.PI * 180;
+	var az  = Math.atan2(fwd[0],fwd[1]) / Math.PI * 180;
+	alt = 'Alt:' + alt.toFixed(1);
+	if(az < 0)
+		az = 360 + az;
+	az  = 'Az:' + az.toFixed(1);
+	context.font = largeF('Sans',5);
+	context.textBaseline = 'bottom';
+	context.textAlign = 'end';
+	context.fillStyle = global_style.altaz;
+	context.fillText(alt,canvas.width - 5,canvas.height - 5)
+	context.textAlign = 'start';
+	context.fillText(az,5,canvas.height - 5)
+}
+
+function selectTarget(index)
+{
+	findTargetByName();
+	global_target_index = index;
+    showHideInfoIcon()
+
+	//global_expecting_select = null;
+}
+
+function selectionEvent(e)
+{
+	let x = e.clientX;
+	let y = e.clientY;
+	let min_dist = 1e100;
+	let min_index = -1;
+	for(var i=0;i<global_targets_list.length;i++) {
+		let dx = global_targets_list[i].x - x;
+		let dy = global_targets_list[i].y - y;
+		let dist = dx*dx + dy*dy;
+		if(min_dist > dist) {
+			min_dist = dist;
+			min_index = global_targets_list[i].index;
+		}
+	}
+	if(global_expecting_select) {
+		global_expecting_select(min_index);
+	}
+}
+	
+function isOpenWikiAllowed()
+{
+    var has_obj = global_target_index >= 0 && allstars[global_target_index].name;
+    if(!has_obj)
+        return false;
+    var enabled = document.getElementById('wiki_info_opt').value;
+    if(enabled == 'no')
+        return false;
+    var nm_enabled = enabled == 'always';
+    if(global_style == global_night_style && !nm_enabled)
+        return false;
+    return true;
+}
+
+function showObjectInfo()
+{
+	if (isOpenWikiAllowed()) {
+		const regex = /^M(\d*)$/gm; // identify Messier objects and target them by their full name
+		const ngc_regex = /^(NGC|IC)(\d*)$/gm; // identify NGC/IC objects and target them by their full name
+        var src_name = allstars[global_target_index].name;
+		var target_name = "";
+		var match_target_messier = regex.exec(src_name);
+		var match_target_ngc = ngc_regex.exec(src_name);
+		if (match_target_messier) { 
+			target_name = "Messier " + match_target_messier[1]
+		} 
+        else if(match_target_ngc) {
+            target_name = match_target_ngc[1]+' '+match_target_ngc[2];
+        }
+        else {
+			target_name = src_name;
+		}
+		showWiki("https://en.wikipedia.org/w/index.php?search=" + encodeURIComponent(target_name));
+	}
+}
+
+function wikiInfoConfig()
+{
+    showHideInfoIcon();
+}
+
+function showHideInfoIcon()
+{
+    var el = document.getElementById('show_info');
+    if(isOpenWikiAllowed())
+        el.style.display='block';
+    else
+        el.style.display='none';
+}
+
+function hideWiki()
+{
+    document.getElementById('wiki_info').style.display = 'none';
+    document.getElementById('wiki_iframe').src = '';
+}
+
+function showWiki(url)
+{
+    document.getElementById('wiki_iframe').src = url;
+    document.getElementById('wiki_info').style.display = 'inline';
+}
+
+function formatLatLon(id,deg,pos,neg)
+{
+	var direction = deg >= 0 ? pos : neg;
+	deg = Math.abs(deg);
+	var ideg = Math.floor(deg);
+	var min = 60*(deg - ideg);
+	var imin = Math.floor(min);
+	var sec = 60*(min - imin);
+	var msg = direction + ideg + "\u00b0" + imin + "'" + sec.toFixed(1) + "''";
+	document.getElementById(id).innerHTML = msg;
+}
+
+function showpos(position)
+{
+	var latlon = position.coords.latitude + "," + position.coords.longitude;
+	gdata.lat = position.coords.latitude;
+	gdata.lon = position.coords.longitude;
+	formatLatLon("lat",gdata.lat,'N','S');
+	formatLatLon("lon",gdata.lon,'E','W');
+	document.getElementById("gps").style.display='none';
+}
+
+
+function requestGeolocation()
+{
+  var manualLocation = getManualLatLonOverrideValues();
+  if(manualLocation != null) {
+      showpos(manualLocation);
+  }
+  else if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(showpos);
+  }
+}
+
+function getLocation() {
+  requestGeolocation();
+  setTimeout(getLocation,600*1000)
+}
+
+function gyroListener(event)
+{
+	if(!(event.alpha === null)) {
+		gdata.alpha_gyro = event.alpha;
+		gdata.beta = event.beta;
+		gdata.gamma = event.gamma;
+		document.getElementById("orient").innerHTML = '';
+	}
+	else {
+		document.getElementById("orient").innerHTML = _tr("No Gyro");
+	}
+	formatValue("ang_a",event.alpha);
+	formatValue("ang_b",event.beta);
+	formatValue("ang_g",event.gamma);
+}
+
+function deviceOrientationListenerIOS(event) {
+	if(!(event.webkitCompassHeading === null)) {
+        var abs_alpha = 360 - event.webkitCompassHeading;
+		if(global_use_compass)
+			gdata.alpha = abs_alpha;
+		gdata.compass_alpha = abs_alpha
+	    formatValue("ang_c",abs_alpha);
+	}
+	else {
+		noCompass();
+	    formatValue("ang_c",null);
+	}
+}
+
+function deviceOrientationListener(event) {
+	if(!(event.alpha === null)) {
+		if(global_use_compass)
+			gdata.alpha = event.alpha;
+		gdata.compass_alpha = event.alpha;
+	}
+	else {
+		noCompass();
+	}
+	formatValue("ang_c",event.alpha);
+}
+
+
+function noCompass()
+{
+	global_use_compass = false;
+	document.getElementById("nocompass_button").style.display="inline";
+	document.getElementById("compass_button").style.display="none";
+	document.getElementById("hand_button").style.display="none";
+}
+
+function manualMode()
+{
+	global_use_compass = false;
+	gdata.alpha_user_offset = gdata.alpha;
+	gdata.alpha = 0;
+	document.getElementById("compass_button").style.display="inline";
+	document.getElementById("hand_button").style.display="none";
+}
+
+function compassMode()
+{
+	global_use_compass = true;
+	gdata.alpha_user_offset = 0;
+	gdata.alpha = gdata.compass_alpha;
+	document.getElementById("compass_button").style.display="none";
+	document.getElementById("hand_button").style.display="inline";
+}
+
+function manualDown(e)
+{
+	global_prev_xy = {"x":e.touches[0].clientX,"y":e.touches[0].clientY };
+    global_toch_start_time = Date.now(); 
+    if(e.touches.length == 2 && global_allow_pinch_zoom) {
+        let dx = e.touches[0].clientX - e.touches[1].clientX;
+        let dy = e.touches[0].clientY - e.touches[1].clientY;
+        global_start_zoom = global_fov;
+        global_start_zoom_size = Math.sqrt(dx*dx + dy*dy);
+    }
+}
+
+function manualMove(e)
+{
+	if(!global_prev_xy)
+		return;
+	
+	var xy = {"x":e.touches[0].clientX,"y":e.touches[0].clientY };
+    if(e.touches.length == 2 && global_start_zoom && global_allow_pinch_zoom) {
+        let dx = e.touches[0].clientX - e.touches[1].clientX;
+        let dy = e.touches[0].clientY - e.touches[1].clientY;
+        let new_size = Math.sqrt(dx*dx + dy*dy);
+        let scale = new_size / Math.max(global_start_zoom_size,0);
+        let max_fov = global_fov_values[global_fov_values.length-1];
+        let min_fov = global_fov_values[0];
+        let fov = 2 * 180 * Math.atan(Math.tan(global_fov / 180.0 * Math.PI / 2) / scale) / Math.PI;
+        let new_global_fov = Math.max(min_fov,Math.min(max_fov,Math.round(fov)));
+        if(new_global_fov != global_fov) {
+            global_fov = new_global_fov;
+            global_start_zoom_size = new_size;
+            global_start_zoom = global_fov;
+            updateFOV();
+        }
+    }
+
+
+	moveSky(global_prev_xy,xy);
+	global_prev_xy = xy;
+    global_toch_start_time = null;
+}
+function manualUp(e)
+{
+	if(!global_prev_xy)
+		return;
+    
+    global_start_zoom = null;
+    global_start_zoom_size = null;
+
+    var touch_end = Date.now();
+    if(global_toch_start_time && touch_end - global_toch_start_time < 500) { 
+        // no move and there is less then 0.5s delay between toch and release
+        selectionEvent({"clientX":global_prev_xy.x,"clientY":global_prev_xy.y})
+    }
+	global_prev_xy = null;
+    global_toch_start_time = null;
+}
+function moveSky(prev,cur)
+{
+	if(global_use_compass)
+		return;
+	if(!prev || !cur)
+		return;
+	var fov =  getFOV().lr;
+	var da = (cur.x - prev.x) / canvas.width * fov;;
+	gdata.alpha_user_offset += da;
+}
+
+function dontPropMouseDown(lst,events_list)
+{
+	for(var i=0;i<lst.length;i++) {
+		var elements = document.getElementsByClassName(lst[i]);
+		for(var j=0;j<elements.length;j++) {
+            for(var k=0;k<events_list.length;k++) {
+    			elements[j].addEventListener(events_list[k],function(e) {
+	    			e.stopPropagation();
+		    	});
+            }
+		}
+	}
+}
+
+
+
+function setupiOSOrientationEvents()
+{
+	if (window.DeviceOrientationEvent) {
+		if(('ondeviceorientation' in window)) {
+			window.addEventListener("deviceorientation", deviceOrientationListenerIOS);
+			window.addEventListener("deviceorientation",gyroListener);
+			compassMode();
+		}
+		else {
+			noCompass();
+		}
+	} else {
+		noCompass();
+	}
+	setUseGyro(false);
+}
+
+
+function setupOrientationEvents()
+{
+	if (window.DeviceOrientationEvent) {
+		if(('ondeviceorientationabsolute' in window)) {
+			window.addEventListener("deviceorientationabsolute", deviceOrientationListener);
+			window.addEventListener("deviceorientation",gyroListener);
+			compassMode();
+		}
+		else if(('ondeviceorientation' in window)) {
+			window.addEventListener("deviceorientation",gyroListener);
+			noCompass();
+		}
+		else {
+			noCompass();
+		}
+	} else {
+		noCompass();
+	}
+	setUseGyro(false);
+}
+
+function formatValue(uid,v)
+{
+	var msg='';
+	if(v === undefined || v==null) {
+		msg = 'No';
+	}
+	else {
+		msg = v.toFixed(1);
+	}
+	document.getElementById(uid).innerHTML=msg;
+}
+
+function parseCSV(v)
+{
+    var res = new Array();
+    var rows = v.split('\n');
+    for(var r=0;r<rows.length;r++) {
+        var parsed_row=new Array();
+        if(rows[r].trim() == '')
+            continue;
+        var cols = rows[r].split(',');
+        for(var c=0;c<cols.length;c++) {
+            parsed_row.push(cols[c].trim())
+        }
+        res.push(parsed_row)
+    }
+    return res;
+}
+
+function parseRA(svalue)
+{
+    const re_float = /^(\d+\.\d+)$/;
+    const re_colon = /^(\d+):(\d+)(?::(\d+(.\d+)?))?$/;
+    const re_hms = /^(\d+)[hH \t]\s*(\d+)[mM'′]\s*(?:(\d+(.\d+)?)(?:s|S|′′|″|''|"))?$/;
+    const re_space = /^(\d+)\s+(\d+)(?:\s+(\d+(.\d+)?))?$/;
+    var res = svalue.match(re_float);
+    var deg = null;
+    if(res) {
+        deg = parseFloat(res[1]);
+        if(deg < 0 || deg > 360)
+            return null;
+        return deg;
+    }
+    res = svalue.match(re_colon) || svalue.match(re_hms) || svalue.match(re_space);
+    if(!res)
+        return null;
+    var h = parseInt(res[1]);
+    var m = parseInt(res[2]);
+    var s = 0;
+    if(res[3]) {
+        s = parseFloat(res[3]);
+    }
+    if(h  >= 24 || m >= 60 || s >= 60) {
+        return null
+    }
+    deg = 15 * (h + (60 * m + s) / 3600.0 );
+    return deg;
+}
+
+function parseDEC(svalue)
+{
+    const re_float = /^([+-−]?\d+\.\d+?)$/;
+    const re_colon = /^([-+−]?)(\d+):(\d+)(?::(\d+(.\d+)?))?$/;
+    const re_dms = /^([-+−]?)(\d+)[dD° \t]\s*(\d+)[mM'′]\s*(?:(\d+(.\d+)?)(?:s|S|″|′′|''))?$/;
+    const re_space = /^([-+−]?)(\d+)\s+(\d+)(?:\s+(\d+(.\d+)?))?$/;
+    var res = svalue.match(re_float)
+    if(res) {
+        var deg = parseFloat(res[1])
+        if(deg < -90 || deg > 90)
+            return null;
+        return deg;
+    }
+    res = svalue.match(re_colon) || svalue.match(re_dms) || svalue.match(re_space);
+    if(!res)
+        return null;
+    var sig = (res[1] == '-' || res[1] == '−')? -1.0 : 1.0;
+    var d = parseInt(res[2]);
+    var m = parseInt(res[3]);
+    var s = 0;
+    if(res[4]) {
+        s = parseFloat(res[4]);
+    }
+    if(d > 90 || m >= 60 || s >= 60)
+        return null;
+    return sig*(d + (60 * m + s) / 3600.0);
+}
+
+
+
+function toggleUI(link_id,ui_id)
+{
+	var ui = document.getElementById(ui_id);
+	if(ui.style.display == "none") {
+		ui.style.display="inline";
+		document.getElementById(link_id).innerHTML = _tr("[hide]");
+	}
+	else {
+		ui.style.display="none";
+		document.getElementById(link_id).innerHTML = _tr("[edit]");
+	}
+}
+
+
+function htmlEscape(v)
+{
+    return v.replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&/g,'&amp;').replace(/"/g,"&quot;").replace(/'/g,'&#39;')
+}
+
+function discardUserDSO()
+{
+    loadUserDSO();
+    toggleEditDSO();
+}
+
+function toggleEditDSO()
+{
+	toggleUI('edit_user_dso','dso_edit');
+}
+
+function saveUserDSO()
+{
+    resetUserDSOsAndMergeNewToAllStars();
+    var text = document.getElementById('user_dso').value;
+    var res = parseUserDSO(text);
+    var dso_errors = document.getElementById('dso_errors');
+    if(res[1].length > 0) {
+        var msg = '<b>Errors:</b><ol>';
+        for(var i=0;i<res[1].length;i++) {
+            msg = msg + '<li>' + htmlEscape(res[1][i]) + '</li>';
+        }
+        msg = msg + '</ol>';
+        dso_errors.innerHTML = msg;
+    }
+    else {
+        dso_errors.innerHTML = '';
+        window.localStorage.setItem('user_dso',text)
+        resetUserDSOsAndMergeNewToAllStars(res[0]);
+	toggleEditDSO();
+    }
+}
+
+function parseUserDSO(value)
+{
+    var errors = []
+    var dsos = new Array();
+    var names = new Set(allstars_index_name.names);
+    var new_names = new Set();
+    var csv = parseCSV(value)
+    for(var i=0;i<csv.length;i++) {
+        if(csv[i].length<3) {
+            errors.push('Too few colums in line ' + (i+1));
+            continue;
+        }
+        var name = csv[i][0];
+        if(name == "") {
+            errors.push('Empty object name in line ' + (i+1));
+            continue;
+        }
+        var sname = normalizeName(name);
+        if(names.has(sname)) {
+            errors.push('Object ' + name + ' exists in data base')
+            continue;
+        }
+        if(new_names.has(sname)) {
+            errors.push('Duplicate object ' + name);
+            continue;
+        }
+        var ra = parseRA(csv[i][1]);
+        if(ra === null) {
+            errors.push('Invalid RA value ' + csv[i][1])
+            continue;
+        }
+        var de = parseDEC(csv[i][2]);
+        if(de === null) {
+            errors.push('Invalid DEC value ' + csv[i][2])
+            continue;
+        }
+        new_names.add(sname)
+        dsos.push({"name":name,"RA":ra,"DE":de,"AM":-1,"t":"U"});
+    }
+    return [dsos,errors]
+}
+function shortenArray(a,l)
+{
+    while(a.length > l) {
+        a.pop();
+    }
+}
+
+function resetUserDSOsAndMergeNewToAllStars(dsos = [])
+{
+    shortenArray(allstars,allstars_db_specs.items)
+    shortenArray(allstars_index_name.names,allstars_db_specs.index_name_size)
+    shortenArray(allstars_index_name.index,allstars_db_specs.index_name_size)
+    for(var i=0;i<dsos.length;i++) {
+        var pos = allstars.length;
+        allstars.push(dsos[i])
+        allstars_index_name.names.push(normalizeName(dsos[i].name));
+        allstars_index_name.index.push(pos);
+    }
+    allstars_index["U"] = allstars.length;
+    if(global_target_index >= allstars.length) {
+        selectTarget(-1);
+    }
+}
+
+function setWatchList(wl)
+{
+	selectWatchList(-1);
+	global_watchlist = wl;
+}
+
+function nextWatchList()
+{
+	if(global_watchlist.current_list + 1 >= global_watchlist.lists.length) {
+		selectWatchList(-1);
+	}
+	else {
+		selectWatchList(global_watchlist.current_list + 1);
+	}
+
+}
+
+function prevWatchList()
+{
+	if(global_watchlist.current_list <= -1) {
+		selectWatchList(global_watchlist.lists.length - 1);
+	}
+	else {
+		selectWatchList(global_watchlist.current_list - 1);
+	}
+
+}
+
+
+function watchListItemUpdate(offset)
+{
+	if(global_watchlist.current_list < 0 || global_watchlist.current_list >= global_watchlist.lists.length)
+		return;
+	var list = global_watchlist.lists[global_watchlist.current_list];
+
+    // handle case you selected a different item and now by pressing '<' or '>' you select the target back
+    if(global_watchlist.current_index != global_target_index)
+        offset = 0;
+	global_watchlist.current_item = (global_watchlist.current_item + offset + list.length) % list.length;
+	findTargetByName(list[global_watchlist.current_item].name);
+    global_watchlist.current_index = global_target_index;
+	markTarget();
+}
+
+function markTarget()
+{
+	var msgEl = document.getElementById("wl_target_name");
+	if(global_watchlist.current_list == -1) {
+		msgEl.innerHTML = "";
+	}
+	else {
+        var item = global_watchlist.lists[global_watchlist.current_list][global_watchlist.current_item];
+		var name = item.name;
+        var comment =  item.comment == "" ? "" : " (" + item.comment +")";
+		msgEl.innerHTML = global_target_index == -1 ? ("?" + name + "?") : (name + comment);
+	}
+}	
+
+
+
+function selectWatchList(index)
+{
+	if(index < 0 || index >= global_watchlist.lists.length) {
+		findTargetByName();
+		document.getElementById("wl_ctl").style.display = 'none';
+		document.getElementById("wl_sel").innerHTML = _tr("None");
+		global_watchlist.current_list = -1;
+		global_watchlist.current_item = -1;
+        global_watchlist.current_index = -1;
+	}
+	else {
+		document.getElementById("wl_ctl").style.display = "inline";
+		document.getElementById("wl_sel").innerHTML = global_watchlist.names[index];
+		global_watchlist.current_list = index;
+		global_watchlist.current_item = 0;
+		findTargetByName(global_watchlist.lists[index][0].name);
+		global_watchlist.current_index = global_target_index;
+	}
+	markTarget();
+}
+
+
+function tokenizeWL(text)
+{
+	const re=/(,|:|"[^"]*"|\s+|\(|\)|[^\s:,"\(\)]*)/;
+	const ws=/^\s+$/;
+	var items=text.split(re);
+	return items.filter(x=>x.trim() != "" && x!=",");
+}
+
+
+function parseWatchList(text)
+{
+	var wl = {
+		lists: [],
+		names: [],
+		current_list: -1,
+		current_item: -1
+	};
+	var not_found = [];
+	var index={};
+	var items = tokenizeWL(text);
+	var list_name = "default";
+	for(var i=0;i<items.length;i++) {
+		var item = items[i];
+		item = item.replace(/"/g,'')
+		if(i+1 < items.length && items[i+1] == ":") {
+			list_name = item;
+			i+=1;
+			continue;
+		}
+		if(item == '(') {
+                    i ++;
+                    var start = i;
+                    while(i < items.length && items[i] != ')')
+                        i++;
+                    var end = i;
+                    if(end > start) {
+                        var comment = items[start];
+                        start ++;
+                        while(start < end) {
+                            comment = comment + " " + items[start];
+                            start ++;
+                        }
+                        if(list_name) {
+                            var arr = wl.lists[index[list_name]];
+                            if(arr.length >= 1) {
+                                arr[arr.length - 1].comment = comment;
+                            }
+                        }
+                    }
+                    continue;
+		}
+		var nitem = normalizeName(item);
+		if(allstars_index_name.names.findIndex(x=>x==nitem) == -1) {
+			not_found.push(item)
+		}
+		if(!(list_name in index)) {
+			index[list_name] = wl.names.length;
+			wl.names.push(list_name);
+			wl.lists.push(new Array());
+		}
+		wl.lists[index[list_name]].push({"name" : item, "comment": ""});
+	}
+	return [wl,not_found]
+}
+
+function loadWL()
+{
+	var wl_text = window.localStorage.getItem("watch_list");
+	if(!wl_text)
+		wl_text = "";
+	var wl = parseWatchList(wl_text);
+	global_watchlist = wl[0];
+	document.getElementById("user_wl").value = wl_text;
+}
+
+function getManualLatLonOverrideValues()
+{
+    var lat = parseFloat(document.getElementById('manual_lat').value);
+    var lon = parseFloat(document.getElementById('manual_lon').value);
+    if(isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+        return null;
+    return {"coords":{"latitude":lat,"longitude":lon}}
+}
+
+function updateManualLatLon()
+{
+    var res = getManualLatLonOverrideValues();
+    if(res != null) {
+        showpos(res);
+    }
+    var lat = document.getElementById('manual_lat').value;
+    var lon = document.getElementById('manual_lon').value;
+    if((lat == '' && lon=='') || res != null) {
+        window.localStorage.setItem('lat_lon',lat + ';' + lon)
+    }
+}
+
+function loadLatLon()
+{
+	var latlon_text = window.localStorage.getItem("lat_lon");
+	if(!latlon_text)
+		latlon_text = ";";
+    var latlon = latlon_text.split(';');
+    document.getElementById('manual_lat').value = latlon[0];
+    document.getElementById('manual_lon').value = latlon[1];
+}
+
+function toggleEditWL()
+{
+	toggleUI('list_edit_toggle','wl_edit');
+}
+
+function saveWL()
+{
+	var text = document.getElementById("user_wl").value;
+	var wl_all = parseWatchList(text);
+	var wl = wl_all[0];
+	var errors = wl_all[1];
+	var emsg = document.getElementById("wl_errors");
+	if(errors.length > 0) {
+		var msg="Not Found:";
+		for(var i=0;i<errors.length;i++) {
+			if(i > 0)
+				msg = msg + ", " + errors[i];
+			else
+				msg = msg + errors[i];
+		}
+		emsg.innerHTML = msg;
+		return;
+	}
+	emsg.innerHTML = "";
+	setWatchList(wl);
+	window.localStorage.setItem("watch_list",text);
+	toggleEditWL();
+}
+
+function discardWL()
+{
+	var wl_text = window.localStorage.getItem("watch_list");
+	if(!wl_text)
+		wl_text = "";
+	document.getElementById("user_wl").value = wl_text;
+	toggleEditWL();
+}
+
+function iOSOrientation()
+{
+	//Notification.requestPermission().then(response => {
+	DeviceOrientationEvent.requestPermission().then(response => {
+		if (response == 'granted') {
+			document.getElementById("allow_orientation").style.display='none';
+			setupiOSOrientationEvents();
+		}
+	})
+	.catch(console.error)
+}
+
+function setupGyros()
+{
+	//if (typeof window.Notification.requestPermission === 'function') {
+	if (window.DeviceOrientationEvent && typeof window.DeviceOrientationEvent.requestPermission === 'function') {
+		document.getElementById("allow_orientation").style.display='inline';
+	}
+	else {
+		setupOrientationEvents();
+	}
+}
+
+function switchNightMode(is_night)
+{
+	global_style = is_night ? global_night_style : global_day_style;
+    showHideInfoIcon();
+}
+
+
+function incDecLF(dsize)
+{
+    var storage = window.localStorage;
+    var fs = storage.getItem('user_fs');
+    var fs = fs ? parseInt(fs) : 0;
+    fs += dsize;
+    if(fs < 0)
+        fs = 0;
+    if(fs > 10)
+        fs = 10;
+    global_large_font  = fs;
+    storage.setItem('user_fs',global_large_font);
+    document.getElementById('lf_val').innerHTML = '' + global_large_font;
+}
+
+function getShowOnStartup(show)
+{
+    var storage = window.localStorage;
+    var qs_hide = storage.getItem('qs_hide_v2')
+    var qs_hide = qs_hide ? parseInt(qs_hide) : 0;
+    return !qs_hide;
+}
+
+function showOnStartup(show,src)
+{
+    window.localStorage.setItem('qs_hide_v2',(show ? '0' : '1'));
+    if(src != 1)
+        document.getElementById('qs_hide_1').checked = !show;
+    if(src != 2)
+        document.getElementById('qs_hide_2').checked = show;
+}   
+
+function dsoMagUpdate(offset)
+{
+	global_dso_mag = global_dso_mag + offset;
+	if(global_dso_mag < 3)
+		global_dso_mag = 3;
+	else if(global_dso_mag > 14)
+		global_dso_mag = 14;
+	document.getElementById('dso_level_val').innerHTML = '' + global_dso_mag;
+    saveMagVal(global_dso_mag,"dso_level_val");
+}
+
+function loadUserDSO()
+{
+    var storage = window.localStorage;
+    var user_dso = storage.getItem('user_dso');
+    document.getElementById("user_dso").value = user_dso;
+    var dso = user_dso ? parseUserDSO(user_dso)[0] : [];
+    resetUserDSOsAndMergeNewToAllStars(dso);
+}
+
+function configureValueOption(target,default_val,onchange)
+{
+    var name = 'opt_' + target;
+    var element = document.getElementById(target);
+    var value = window.localStorage.getItem(name);
+    if(!value) {
+        value = default_val;
+    }
+
+    element.value = value;
+    onchange(value);
+    element.addEventListener('change',function(){
+        onchange(this.checked);
+        window.localStorage.setItem(name,this.value);
+    });
+}
+
+function configureCheckboxOption(target,default_val,onchange)
+{
+    var name = 'opt_' + target;
+    var element = document.getElementById(target);
+    var svalue = window.localStorage.getItem(name);
+    if(!svalue) {
+        svalue = default_val ? '1' : '0';
+    }
+
+    var checked = !!parseInt(svalue);
+    element.checked = checked;
+    onchange(checked);
+    element.addEventListener('change',function(){
+        onchange(this.checked);
+        window.localStorage.setItem(name,this.checked ? '1' : '0');
+    });
+}
+
+function saveMagVal(val,name)
+{
+    window.localStorage.setItem('mag_' + name, '' + val);
+}
+
+function langSelect()
+{
+    global_lang = document.getElementById('lang_select').value;
+    translateAll();
+}
+
+function _tr(x)
+{
+    var d = i18n_dicts[global_lang] || {};
+    var tr = d[x] || x
+    return tr;
+}
+
+function translateAll()
+{
+    var trs = document.getElementsByClassName('tr');
+    if(g_original == null) {
+        g_original = []
+        for(var i=0;i<trs.length;i++) {
+            var orig = trs[i].innerHTML;
+            g_original.push(orig);
+        }
+    }
+    for(var i=0;i<trs.length;i++) {
+        trs[i].innerHTML = _tr(g_original[i]);
+    }
+    var is_rtl = _tr("LTR") == 'RTL';
+    var rtl = document.getElementsByClassName('r2l');
+    for(var i=0;i<rtl.length;i++)
+        rtl[i].dir= is_rtl ? 'rtl' : 'ltr';
+    var ltr = document.getElementsByClassName('l2r');
+    for(var i=0;i<ltr.length;i++)
+        ltr[i].dir='ltr';
+    document.getElementById("search_field_main").value = _tr("search");
+    var mans = document.getElementsByClassName('manual_section');
+    for(var i=0;i<mans.length;i++)
+        mans[i].style.display = 'none';
+    var lang = document.getElementById('lang_select').value;
+    var manual = document.getElementById('manual_tr_' + lang);
+    if(!manual)
+        manual = document.getElementById('manual_tr_en');
+    manual.style.display = 'block';
+}
+
+
+
+function configSaveMag()
+{
+    var opts = [
+        {   name : "dso_level_val", 
+            setv: (x) => { global_dso_mag=x; dsoMagUpdate(0); } 
+        },
+        { 
+            name : "mag_val",
+            setv: (x) => { global_mag = x; starMagUpdate(0); }
+        }
+    ];
+    for(var i=0;i<opts.length;i++) {
+        var c = opts[i];
+        var sval = window.localStorage.getItem('mag_' + c.name);
+        if(!sval)
+            sval = document.getElementById(c.name).innerHTML;
+        c.setv(parseInt(sval));
+    }
+
+}
+
+function setupConfigurableElements()
+{
+    configureCheckboxOption('small_screen',false,smallScreen);
+    configureCheckboxOption('NM_checked',false,switchNightMode);
+    configureCheckboxOption('SWL_checked',false,toggleSWL)
+    configureCheckboxOption('align_dso_checked',false,(v) => { global_align_on_dso = v; });
+    configureCheckboxOption('show_star_names_checked',true,(v) => { global_show_star_names = v; });
+    configureCheckboxOption('P_checked',true,(v) => { global_show_obj.P = v; });
+    configureCheckboxOption('Oc_checked',true,(v) => { global_show_obj.Oc = v; });
+    configureCheckboxOption('Gc_checked',true,(v) => { global_show_obj.Gc = v; });
+    configureCheckboxOption('Ga_checked',true,(v) => { global_show_obj.Ga = v; });
+    configureCheckboxOption('Ne_checked',true,(v) => { global_show_obj.Ne = v; });
+    configureCheckboxOption('Ca_checked',true,(v) => { global_show_obj.Ca = v; });
+    configureCheckboxOption('U_checked',true,(v) => { global_show_obj.U = v; });
+    configureValueOption('wiki_info_opt','day',(v) => { wikiInfoConfig(); });
+    configureValueOption('lang_select','en',(v) => { langSelect(); });
+
+    // turn off by default on iOS
+    var agent = navigator.userAgent
+    var iOS = /iPad|iPhone|iPod/.test(agent);
+    configureCheckboxOption('pinch_zoom',!iOS,(v) => { global_allow_pinch_zoom = v; });
+}
+
+setupConfigurableElements();
+translateAll()
+setupGyros();
+configSaveMag();
+// global drawing stuff
+var canvas = document.getElementById('myCanvas');
+canvas.width = document.body.clientWidth;
+canvas.height = document.body.clientHeight;
+var context = canvas.getContext('2d');
+loadLatLon();
+setTimeout(getLocation,500)
+setTimeout(plotStars,1000)
+loadUserDSO();
+loadWL();
+incDecLF(0);
+{
+    let qs = getShowOnStartup();
+    document.getElementById('quick_start').style.display = qs ? 'inline' : 'none';
+    showOnStartup(qs,-1);
+}
+document.body.addEventListener('click',selectionEvent);
+document.body.addEventListener('touchstart',manualDown);
+document.body.addEventListener('touchend',manualUp);
+document.body.addEventListener('touchcancel',manualUp);
+document.body.addEventListener('touchmove',manualMove);
+dontPropMouseDown(["ui_but","incdec_but","config_div","comp_but","search_field"],["click","touchstart","touchend","touchmove","touchcancel"]);
+global_expecting_select = selectTarget;
+
+window.addEventListener("load", () => {
+        // Service worker désactivé — servi localement par RPi0, pas besoin d'offline cache
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.getRegistrations().then(regs => {
+                for (const r of regs) r.unregister();
+            });
+        }
+});
+
+</script>
+
+
+</body>
+</html>

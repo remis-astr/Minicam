@@ -1,0 +1,18 @@
+[Unit]
+Description=minicam réseau USB gadget (ECM)
+After=systemd-modules-load.service
+Conflicts=minicam-net-wifi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '\
+    python3 -c "from minicam.net.usb_gadget import setup_gadget, bring_up; setup_gadget(); bring_up()" \
+'
+ExecStop=/bin/bash -c '\
+    python3 -c "from minicam.net.usb_gadget import tear_down; tear_down()" \
+'
+Environment=PYTHONPATH=/opt/minicam/src
+
+[Install]
+WantedBy=multi-user.target

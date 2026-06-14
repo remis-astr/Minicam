@@ -1,0 +1,13 @@
+[Unit]
+Description=minicam USB route watcher
+After=minicam-net-usb.service
+BindsTo=minicam-net-usb.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/minicam-usb-route-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=minicam-net-usb.service
