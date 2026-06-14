@@ -268,12 +268,8 @@ async def _broadcast(app: Any, event: dict) -> None:
 
 
 async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
-    mode = params.get("mode", "isp_jpeg")
-    gain = float(params.get("gain", camera.gain))
-    exposure_ms = float(params.get("exposure_ms", camera.exposure_us / 1000))
+    mode    = params.get("mode", "isp_jpeg")
     end_str = params.get("end_time", "23:59")
-    wb_red  = float(params.get("wb_red",  camera.wb_red))
-    wb_blue = float(params.get("wb_blue", camera.wb_blue))
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = TIMELAPSE_DIR / session_id
@@ -284,8 +280,8 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
         "mode": mode,
         "started_at": datetime.now().isoformat(),
         "end_time": end_str,
-        "gain": gain,
-        "exposure_ms": exposure_ms,
+        "gain": camera.gain,
+        "exposure_ms": camera.exposure_us / 1000,
     }
     (session_dir / "session_info.json").write_text(json.dumps(session_info))
 
@@ -306,10 +302,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     last_broadcast = 0.0
 
     try:
-        await loop.run_in_executor(
-            None, camera.apply_timelapse_settings,
-            gain, exposure_ms, wb_red, wb_blue,
-        )
+        await loop.run_in_executor(None, camera.apply_timelapse_settings)
 
         await _broadcast(app, {
             "cmd": "tl_started",

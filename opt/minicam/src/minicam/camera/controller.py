@@ -241,29 +241,23 @@ class CameraController:
                 exp_us, actual,
             )
 
-    def apply_timelapse_settings(
-        self,
-        gain: float,
-        exposure_ms: float,
-        wb_red: float,
-        wb_blue: float,
-    ) -> None:
-        """Apply timelapse gain/exposure/WB and drain the sensor pipeline. Uses stored ISP values."""
+    def apply_timelapse_settings(self) -> None:
+        """Confirm stored settings are active on the sensor (drain pipeline)."""
         with self._lock:
             if not self._picam2:
                 raise RuntimeError("Camera not open")
             p = self._picam2
-            exp_us = int(max(0.1, min(30000.0, exposure_ms)) * 1000)
+            exp_us = self.exposure_us
             fd = self._frame_duration_us(exp_us)
             p.set_controls({
-                "AnalogueGain": max(1.0, min(64.0, gain)),
+                "AnalogueGain": self.gain,
                 "ExposureTime": exp_us,
                 "FrameDurationLimits": (fd, fd),
                 "Contrast":   self.contrast,
                 "Sharpness":  self.sharpness,
                 "Saturation": self.saturation,
                 "Brightness": self.brightness,
-                "ColourGains": (max(0.1, min(8.0, wb_red)), max(0.1, min(8.0, wb_blue))),
+                "ColourGains": (self.wb_red, self.wb_blue),
                 "NoiseReductionMode": self.noise_reduction,
             })
         tolerance = max(500, exp_us // 20)

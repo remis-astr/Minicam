@@ -457,12 +457,8 @@ elBtnShutdown.addEventListener('click', () => sysAction('shutdown', 'Arrêt'));
 
 // --- Timelapse ---
 
-const elTlMode       = document.getElementById('tl-mode');
-const elTlGain       = document.getElementById('tl-gain');
-const elTlExpo       = document.getElementById('tl-expo');
-const elTlWbRed      = document.getElementById('tl-wb-red');
-const elTlWbBlue     = document.getElementById('tl-wb-blue');
-const elTlEndTime    = document.getElementById('tl-end-time');
+const elTlMode    = document.getElementById('tl-mode');
+const elTlEndTime = document.getElementById('tl-end-time');
 const elBtnTlStart   = document.getElementById('btn-tl-start');
 const elBtnTlStop    = document.getElementById('btn-tl-stop');
 const elTlStatus     = document.getElementById('tl-status');
@@ -472,15 +468,7 @@ const elTlPreviewImg = document.getElementById('tl-preview-img');
 let tlPreviewTimer = null;
 
 elBtnTlStart.addEventListener('click', () => {
-  send({
-    cmd: 'start_timelapse',
-    mode: elTlMode.value,
-    gain: parseFloat(elTlGain.value),
-    exposure_ms: parseFloat(elTlExpo.value),
-    end_time: elTlEndTime.value,
-    wb_red:  parseFloat(elTlWbRed.value),
-    wb_blue: parseFloat(elTlWbBlue.value),
-  });
+  send({ cmd: 'start_timelapse', mode: elTlMode.value, end_time: elTlEndTime.value });
 });
 
 elBtnTlStop.addEventListener('click', () => send({ cmd: 'stop_timelapse' }));
