@@ -221,31 +221,31 @@ def _save_frame_sync(data: Any, idx: int, mode: str, session_dir: Path, app: Any
     try:
         jpeg_bytes: bytes | None = None
 
-        # data is always (raw, meta) — all modes use raw capture to avoid
-        # the ISP stream's 2x frame-period pipeline latency
-        raw, meta = data
-        unpacked = _unpack_raw12(raw)
-        scaled = np.clip(unpacked >> 4, 0, 255).astype(np.uint8)
-
         if mode == "isp_jpeg":
-            rgb = cv2.cvtColor(scaled, cv2.COLOR_BAYER_RG2RGB)
-            ok, buf = cv2.imencode(".jpg", rgb, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            # data = YUV420 array from ISP (hardware debayer + NR applied)
+            img = cv2.cvtColor(data, cv2.COLOR_YUV420p2RGB)
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
             if ok:
                 jpeg_bytes = buf.tobytes()
                 (session_dir / f"{idx:08d}.jpg").write_bytes(jpeg_bytes)
 
         elif mode == "isp_png":
-            rgb = cv2.cvtColor(scaled, cv2.COLOR_BAYER_RG2RGB)
-            ok, buf = cv2.imencode(".png", rgb)
+            # data = YUV420 array from ISP
+            img = cv2.cvtColor(data, cv2.COLOR_YUV420p2RGB)
+            ok, buf = cv2.imencode(".png", img)
             if ok:
                 (session_dir / f"{idx:08d}.png").write_bytes(buf.tobytes())
-            ok_j, j_buf = cv2.imencode(".jpg", rgb, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok_j, j_buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok_j:
                 jpeg_bytes = j_buf.tobytes()
 
         elif mode == "raw_fits":
+            # data = (raw_array, metadata) — Bayer RAW12, no ISP processing
+            raw, meta = data
+            unpacked = _unpack_raw12(raw)
             fits_bytes = _write_fits(unpacked, meta)
             (session_dir / f"{idx:08d}.fits").write_bytes(fits_bytes)
+            scaled = np.clip(unpacked >> 4, 0, 255).astype(np.uint8)
             h, w = scaled.shape
             preview = cv2.resize(scaled, (800, int(h * 800 / w))) if w > 800 else scaled
             rgb = cv2.cvtColor(preview, cv2.COLOR_BAYER_RG2RGB)
@@ -272,9 +272,12 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     gain = float(params.get("gain", camera.gain))
     exposure_ms = float(params.get("exposure_ms", camera.exposure_us / 1000))
     end_str = params.get("end_time", "23:59")
-    contrast = float(params.get("contrast", 1.0))
-    sharpness = float(params.get("sharpness", 1.0))
-    wb_red = float(params.get("wb_red", camera.wb_red))
+    contrast        = float(params.get("contrast",        1.0))
+    sharpness       = float(params.get("sharpness",       1.0))
+    saturation      = float(params.get("saturation",      1.0))
+    brightness      = float(params.get("brightness",      0.0))
+    noise_reduction = int(params.get("noise_reduction",   2))   # 0=Off 1=Fast 2=HighQuality
+    wb_red  = float(params.get("wb_red",  camera.wb_red))
     wb_blue = float(params.get("wb_blue", camera.wb_blue))
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -311,6 +314,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
         await loop.run_in_executor(
             None, camera.apply_timelapse_settings,
             gain, exposure_ms, contrast, sharpness, wb_red, wb_blue,
+            saturation, brightness, noise_reduction,
         )
 
         await _broadcast(app, {
@@ -330,9 +334,12 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
             if datetime.now() >= end_dt:
                 break
 
-            # Always capture raw — ISP stream has 2x frame-period latency,
-            # raw stream has 1x. Debayering is done in the save thread.
-            frame_data = await loop.run_in_executor(None, camera.capture_raw)
+            # ISP modes use capture_frame() (hardware debayer + NR).
+            # raw_fits uses capture_raw() to preserve the unprocessed Bayer data.
+            if mode == "raw_fits":
+                frame_data = await loop.run_in_executor(None, camera.capture_raw)
+            else:
+                frame_data = await loop.run_in_executor(None, camera.capture_frame)
 
             t_now = time.monotonic()
             interval_ms = int((t_now - t_last_capture) * 1000)

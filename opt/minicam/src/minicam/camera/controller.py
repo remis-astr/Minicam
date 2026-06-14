@@ -213,6 +213,9 @@ class CameraController:
         sharpness: float,
         wb_red: float,
         wb_blue: float,
+        saturation: float = 1.0,
+        brightness: float = 0.0,
+        noise_reduction: int = 2,  # 0=Off 1=Fast 2=HighQuality 3=Minimal
     ) -> None:
         """Apply timelapse settings once and drain the sensor pipeline."""
         with self._lock:
@@ -225,9 +228,12 @@ class CameraController:
                 "AnalogueGain": max(1.0, min(64.0, gain)),
                 "ExposureTime": exp_us,
                 "FrameDurationLimits": (fd, fd),
-                "Contrast": max(0.0, min(4.0, contrast)),
-                "Sharpness": max(0.0, min(4.0, sharpness)),
+                "Contrast":   max(0.0, min(32.0, contrast)),
+                "Sharpness":  max(0.0, min(16.0, sharpness)),
+                "Saturation": max(0.0, min(32.0, saturation)),
+                "Brightness": max(-1.0, min(1.0, brightness)),
                 "ColourGains": (max(0.1, min(8.0, wb_red)), max(0.1, min(8.0, wb_blue))),
+                "NoiseReductionMode": max(0, min(3, noise_reduction)),
             })
         tolerance = max(500, exp_us // 20)
         actual = 0
@@ -258,9 +264,12 @@ class CameraController:
                 "AnalogueGain": self.gain,
                 "ExposureTime": self.exposure_us,
                 "FrameDurationLimits": (fd, fd),
-                "Contrast": 1.0,
-                "Sharpness": 1.0,
+                "Contrast":   1.0,
+                "Sharpness":  1.0,
+                "Saturation": 1.0,
+                "Brightness": 0.0,
                 "ColourGains": (self.wb_red, self.wb_blue),
+                "NoiseReductionMode": 1,  # Fast pour le preview
             })
         log.info("Preview settings restored: gain=%.2f exposure_us=%d", self.gain, self.exposure_us)
 
