@@ -63,9 +63,7 @@ def _write_fits(data: np.ndarray, meta: dict | None = None) -> bytes:
 async def capture_png(request: Request) -> Response:
     camera = request.app.state.camera
     frame = await asyncio.get_event_loop().run_in_executor(None, camera.capture_frame)
-    # IMX462 ISP swaps R↔B in YUV output; YUV2RGB fed to imencode (BGR assumption) corrects it
-    img = cv2.cvtColor(frame, cv2.COLOR_YUV420p2RGB)
-    ok, buf = cv2.imencode(".png", img)
+    ok, buf = cv2.imencode(".png", frame)
     if not ok:
         return Response(status_code=500)
     return Response(

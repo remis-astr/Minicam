@@ -38,7 +38,7 @@ class CameraController:
     def _make_config(self) -> Any:
         size = RESOLUTIONS[self.resolution]
         return self._picam2.create_video_configuration(  # type: ignore[union-attr]
-            main={"format": "YUV420", "size": size},
+            main={"format": "RGB888", "size": size},
             raw={"format": "SRGGB12_CSI2P", "size": size},
             display=None,
         )

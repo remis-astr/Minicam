@@ -222,16 +222,13 @@ def _save_frame_sync(data: Any, idx: int, mode: str, session_dir: Path, app: Any
         jpeg_bytes: bytes | None = None
 
         if mode == "isp_jpeg":
-            # data = YUV420 array from ISP (hardware debayer + NR applied)
-            img = cv2.cvtColor(data, cv2.COLOR_YUV420p2RGB)
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            ok, buf = cv2.imencode(".jpg", data, [cv2.IMWRITE_JPEG_QUALITY, 95])
             if ok:
                 jpeg_bytes = buf.tobytes()
                 (session_dir / f"{idx:08d}.jpg").write_bytes(jpeg_bytes)
 
         elif mode == "isp_png":
-            # data = YUV420 array from ISP
-            img = cv2.cvtColor(data, cv2.COLOR_YUV420p2RGB)
+            img = data
             ok, buf = cv2.imencode(".png", img)
             if ok:
                 (session_dir / f"{idx:08d}.png").write_bytes(buf.tobytes())

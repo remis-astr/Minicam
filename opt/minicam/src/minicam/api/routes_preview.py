@@ -31,9 +31,7 @@ async def _capture_loop(camera: Any, state: Any) -> None:
         t0 = asyncio.get_event_loop().time()
         try:
             frame = await asyncio.get_event_loop().run_in_executor(None, camera.capture_frame)
-            # IMX462 ISP swaps R↔B in YUV output; YUV2RGB fed to imencode (BGR assumption) corrects it
-            img = cv2.cvtColor(frame, cv2.COLOR_YUV420p2RGB)
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
             if ok:
                 state.last_preview_jpeg = buf.tobytes()
         except Exception as e:
