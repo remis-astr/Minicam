@@ -267,6 +267,15 @@ async def _broadcast(app: Any, event: dict) -> None:
         await q.put(event)
 
 
+def _broadcast_nowait(app: Any, event: dict) -> None:
+    """Synchronous broadcast — safe to call from finally/CancelledError handlers."""
+    for q in list(app.state.seq_subscribers):
+        try:
+            q.put_nowait(event)
+        except Exception:
+            pass
+
+
 async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     mode    = params.get("mode", "isp_jpeg")
     end_str = params.get("end_time", "23:59")
@@ -300,6 +309,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
     loop = asyncio.get_event_loop()
     frame_count = 0
     last_broadcast = 0.0
+    _sent_terminal = False
 
     try:
         await loop.run_in_executor(None, camera.apply_timelapse_settings)
@@ -366,6 +376,7 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
             "session": session_id,
             "frames": frame_count,
         })
+        _sent_terminal = True
         log.info("Timelapse done: %d frames saved to %s", frame_count, session_dir)
 
     except asyncio.CancelledError:
@@ -373,13 +384,15 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
         if save_fut is not None:
             try:
                 await asyncio.shield(save_fut)
-            except Exception:
+            except BaseException:
                 pass
-        await _broadcast(app, {"cmd": "tl_done", "session": session_id, "frames": frame_count})
     except Exception as e:
         log.error("Timelapse error: %s", e)
-        await _broadcast(app, {"cmd": "tl_error", "detail": str(e)})
+        _broadcast_nowait(app, {"cmd": "tl_error", "detail": str(e)})
+        _sent_terminal = True
     finally:
         app.state.tl_running = False
         app.state.tl_task = None
+        if not _sent_terminal:
+            _broadcast_nowait(app, {"cmd": "tl_done", "session": session_id, "frames": frame_count})
         await loop.run_in_executor(None, camera.restore_preview_settings)
