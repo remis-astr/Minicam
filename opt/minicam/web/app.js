@@ -404,11 +404,16 @@ elBtnTlStart.addEventListener('click', () => {
   send({ cmd: 'start_timelapse', mode: elTlMode.value, end_time: elTlEndTime.value });
 });
 
-elBtnTlStop.addEventListener('click', () => send({ cmd: 'stop_timelapse' }));
+elBtnTlStop.addEventListener('click', () => {
+  send({ cmd: 'stop_timelapse' });
+  elTlStatus.textContent = 'Arrêt en cours — fin de l\'exposition…';
+  elBtnTlStop.disabled = true;
+});
 
 function _tlSetRunning(running) {
   elBtnTlStart.classList.toggle('hidden', running);
   elBtnTlStop.classList.toggle('hidden', !running);
+  elBtnTlStop.disabled = false;
   // ISP controls disabled during timelapse (settings apply at start)
   elContrastInput.disabled   = running;
   elSharpnessInput.disabled  = running;
