@@ -1,0 +1,13 @@
+[Unit]
+Description=minicam relais WiFi:8080 -> API du M8S (nftables)
+After=network.target minicam-net-usb.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
+ExecStart=/usr/sbin/nft -f /etc/minicam/m8s-forward.nft
+ExecStop=/usr/sbin/nft delete table ip m8s_fwd
+
+[Install]
+WantedBy=multi-user.target

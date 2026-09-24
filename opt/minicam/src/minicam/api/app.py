@@ -13,6 +13,7 @@ from minicam.camera.controller import CameraController
 from minicam.imu import IMUStreamer
 from minicam.api.routes_capture import router as capture_router
 from minicam.api.routes_control import router as control_router
+from minicam.api.routes_guide import router as guide_router
 from minicam.api.routes_imu import router as imu_router
 from minicam.api.routes_preview import router as preview_router, start_capture_loop
 from minicam.api.routes_raw_stream import router as raw_router
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(control_router)
     app.include_router(preview_router)
     app.include_router(capture_router)
+    app.include_router(guide_router)
     app.include_router(raw_router)
     app.include_router(imu_router)
     app.include_router(timelapse_router)

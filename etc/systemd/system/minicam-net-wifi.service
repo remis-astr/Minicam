@@ -1,7 +1,6 @@
 [Unit]
 Description=minicam réseau WiFi (client)
 After=NetworkManager.service
-Conflicts=minicam-net-usb.service
 
 [Service]
 Type=oneshot

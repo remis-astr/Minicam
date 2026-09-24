@@ -1,7 +1,6 @@
 [Unit]
 Description=minicam réseau USB gadget (ECM)
 After=systemd-modules-load.service
-Conflicts=minicam-net-wifi.service
 
 [Service]
 Type=oneshot

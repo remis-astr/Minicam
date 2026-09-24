@@ -8,6 +8,8 @@ import cv2
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
+from minicam.api.routes_guide import guide_active
+
 log = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -26,6 +28,10 @@ async def _capture_loop(camera: Any, state: Any) -> None:
             await asyncio.sleep(0.1)
             continue
         if getattr(state, "tl_running", False):
+            await asyncio.sleep(0.5)
+            continue
+        if guide_active(state):
+            # Session de guidage du M8S en cours (voir routes_guide.py).
             await asyncio.sleep(0.5)
             continue
         t0 = asyncio.get_event_loop().time()
