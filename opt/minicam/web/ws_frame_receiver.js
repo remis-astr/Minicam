@@ -6,9 +6,11 @@
  * Protocole binaire (un seul message par frame) :
  *   [4 octets big-endian : longueur JSON][JSON UTF-8][uint16 LE pixels]
  *
- * JSON meta : { width, height, gain, exposure_ms, bayer, exposure_us, ts }
- * Pixels    : Uint16Array, width × height valeurs, Bayer RGGB, échelle 0–65520
- *             (RAW12 décalé à gauche de 4 bits par routes_raw_stream.py)
+ * JSON meta : { width, height, gain, exposure_ms, bayer, exposure_us, format, ts }
+ * Pixels    : format='raw' (défaut) → Uint16Array (ou Uint8Array si bit_depth=8),
+ *             width × height valeurs, motif Bayer donné par meta.bayer.
+ *             format='jpeg'|'png'   → Uint8Array, bytes JPEG/PNG bruts (déjà
+ *             débayerisés par l'ISP) — à décoder côté consommateur.
  *
  * Usage :
  *   const rx = new WsFrameReceiver('ws://192.168.7.2/ws/raw');
@@ -36,6 +38,7 @@ export class WsFrameReceiver {
         this._targetFps       = null;
         this._initialRoi      = null;
         this._initialBitDepth = null;
+        this._initialFormat   = null;
     }
 
     // --- API publique --------------------------------------------------
@@ -66,11 +69,12 @@ export class WsFrameReceiver {
      * La reconnexion automatique est gérée en interne.
      * @param {number} [fps] - Débit cible à envoyer au serveur après connexion (1–15).
      */
-    async start(fps, roi, bitDepth) {
+    async start(fps, roi, bitDepth, format) {
         this._stopped         = false;
         this._targetFps       = fps ?? null;
         this._initialRoi      = roi ?? null;
         this._initialBitDepth = bitDepth ?? null;
+        this._initialFormat   = format ?? null;
         return this._connect();
     }
 
@@ -94,6 +98,13 @@ export class WsFrameReceiver {
         const cmd = (w && h) ? { cmd: 'set_roi', w, h } : { cmd: 'set_roi', w: null, h: null };
         if (this._ws?.readyState === WebSocket.OPEN)
             this._ws.send(JSON.stringify(cmd));
+    }
+
+    /** Définit le format de frame : 'raw' (Bayer, défaut), 'jpeg' ou 'png' (déjà débayerisé par l'ISP). */
+    setFormat(format) {
+        this._initialFormat = format;
+        if (this._ws?.readyState === WebSocket.OPEN)
+            this._ws.send(JSON.stringify({ cmd: 'set_format', format }));
     }
 
     /** Envoie une commande JSON quelconque sur le WebSocket. */
@@ -130,6 +141,8 @@ export class WsFrameReceiver {
                     ws.send(JSON.stringify({ cmd: 'set_roi', w: this._initialRoi[0], h: this._initialRoi[1] }));
                 if (this._initialBitDepth != null)
                     ws.send(JSON.stringify({ cmd: 'set_bitdepth', bit_depth: this._initialBitDepth }));
+                if (this._initialFormat != null)
+                    ws.send(JSON.stringify({ cmd: 'set_format', format: this._initialFormat }));
                 resolved = true;
                 resolve();
             };
@@ -190,7 +203,11 @@ export class WsFrameReceiver {
         if (buf.byteLength <= rawOffset) return;
 
         let pixels;
-        if ((meta.bit_depth ?? 16) === 8) {
+        if (meta.format === 'jpeg' || meta.format === 'png') {
+            // Bytes JPEG/PNG opaques (déjà débayerisés côté ISP) — pas un tableau
+            // de pixels typé, le consommateur (stacker.js) les décode lui-même.
+            pixels = new Uint8Array(buf, rawOffset);
+        } else if ((meta.bit_depth ?? 16) === 8) {
             // 8-bit : Uint8Array, pas de contrainte d'alignement
             pixels = new Uint8Array(buf, rawOffset);
         } else if (rawOffset % 2 === 0) {

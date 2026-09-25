@@ -14,11 +14,11 @@ import numpy as np
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from minicam.api.routes_capture import _unpack_raw12, _write_fits
+from minicam.api.routes_capture import _write_fits, cv2_bayer_code, unpack_raw
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-TIMELAPSE_DIR = Path("/var/lib/minicam/timelapse")
+TIMELAPSE_DIR = Path("/timelapse")
 
 
 @router.get("/timelapse/last.jpg")
@@ -127,6 +127,7 @@ def _fits_to_jpeg(filepath: Path) -> bytes:
     """Debayer a FITS file (written by _write_fits) and return JPEG bytes."""
     raw = filepath.read_bytes()
     naxis1, naxis2 = 0, 0
+    bayer_pattern = "RGGB"
     header_end = 0
     for block_start in range(0, len(raw), 2880):
         block = raw[block_start:block_start + 2880]
@@ -136,6 +137,8 @@ def _fits_to_jpeg(filepath: Path) -> bytes:
                 naxis1 = int(card[10:30].strip())
             elif card.startswith("NAXIS2"):
                 naxis2 = int(card[10:30].strip())
+            elif card.startswith("BAYERPAT"):
+                bayer_pattern = card[10:].strip().strip("'").strip()
             elif card.startswith("END "):
                 header_end = block_start + 2880
                 break
@@ -150,7 +153,7 @@ def _fits_to_jpeg(filepath: Path) -> bytes:
     h, w = scaled.shape
     if w > 1280:
         scaled = cv2.resize(scaled, (1280, int(h * 1280 / w)))
-    rgb = cv2.cvtColor(scaled, cv2.COLOR_BAYER_RG2RGB)
+    rgb = cv2.cvtColor(scaled, cv2_bayer_code(bayer_pattern))
     ok, buf = cv2.imencode(".jpg", rgb, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise ValueError("JPEG encode failed")
@@ -237,15 +240,18 @@ def _save_frame_sync(data: Any, idx: int, mode: str, session_dir: Path, app: Any
                 jpeg_bytes = j_buf.tobytes()
 
         elif mode == "raw_fits":
-            # data = (raw_array, metadata) — Bayer RAW12, no ISP processing
+            # data = (raw_array, metadata) — packed Bayer RAW, no ISP processing
             raw, meta = data
-            unpacked = _unpack_raw12(raw)
-            fits_bytes = _write_fits(unpacked, meta)
+            camera = app.state.camera
+            bits = camera.raw_bits
+            unpacked = unpack_raw(raw, bits, camera.raw_size[0])
+            bayer_pattern = camera.bayer_pattern
+            fits_bytes = _write_fits(unpacked, meta, instrument=camera.sensor, bayer_pattern=bayer_pattern)
             (session_dir / f"{idx:08d}.fits").write_bytes(fits_bytes)
-            scaled = np.clip(unpacked >> 4, 0, 255).astype(np.uint8)
+            scaled = np.clip(unpacked >> (bits - 8), 0, 255).astype(np.uint8)
             h, w = scaled.shape
             preview = cv2.resize(scaled, (800, int(h * 800 / w))) if w > 800 else scaled
-            rgb = cv2.cvtColor(preview, cv2.COLOR_BAYER_RG2RGB)
+            rgb = cv2.cvtColor(preview, cv2_bayer_code(bayer_pattern))
             ok_j, j_buf = cv2.imencode(".jpg", rgb, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok_j:
                 jpeg_bytes = j_buf.tobytes()
@@ -274,21 +280,30 @@ def _broadcast_nowait(app: Any, event: dict) -> None:
 
 
 async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
-    mode    = params.get("mode", "isp_jpeg")
-    end_str = params.get("end_time", "23:59")
+    mode             = params.get("mode", "isp_jpeg")
+    end_str          = params.get("end_time", "23:59")
+    auto_gain        = bool(params.get("auto_gain", False))
+    auto_gain_target = float(params.get("auto_gain_target", 80.0))
+    auto_gain_max    = float(params.get("auto_gain_max", 16.0))
+    interval_s       = max(0.0, float(params.get("interval_s", 0) or 0))
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = TIMELAPSE_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     end_dt = _end_datetime(end_str)
 
-    session_info = {
+    session_info: dict = {
         "mode": mode,
         "started_at": datetime.now().isoformat(),
         "end_time": end_str,
         "gain": camera.gain,
         "exposure_ms": camera.exposure_us / 1000,
     }
+    if auto_gain:
+        session_info["auto_gain_target"] = auto_gain_target
+        session_info["auto_gain_max"]    = auto_gain_max
+    if interval_s > 0:
+        session_info["interval_s"] = interval_s
     (session_dir / "session_info.json").write_text(json.dumps(session_info))
 
     app.state.tl_running = True
@@ -301,14 +316,18 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
         "end_time": end_str,
         "end_dt": end_dt.isoformat(),
         "frame_count": 0,
+        "interval_s": interval_s,
     }
 
     loop = asyncio.get_event_loop()
     frame_count = 0
     last_broadcast = 0.0
     _sent_terminal = False
+    tl_gain = camera.gain   # tracks current auto-gain value (separate from camera.gain)
 
     try:
+        # All modes (raw_fits and the ISP modes alike) capture at whatever
+        # raw_mode is currently selected — no separate reconfigure needed.
         await loop.run_in_executor(None, camera.apply_timelapse_settings)
 
         await _broadcast(app, {
@@ -341,6 +360,36 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
             frame_count += 1
             app.state.tl_session["frame_count"] = frame_count
 
+            # Auto-gain: measure brightness of the just-captured frame and adjust
+            # gain for the next one.
+            if auto_gain:
+                if mode == "raw_fits":
+                    # Quick brightness estimate straight from the packed bytes,
+                    # skipping the sub-byte LSB group (last byte of each pack
+                    # group): those "coarse" bytes already approximate
+                    # pixel >> (bits - 8), so no need for a full unpack here.
+                    # Row stride can be padded beyond the tight packed width
+                    # (see unpack_raw docstring) — slice to the real width
+                    # first or padding bytes bleed into the average.
+                    width = camera.raw_size[0]
+                    if camera.raw_bits == 12:
+                        tight = frame_data[0][:, : (width // 2) * 3]
+                        flat = tight.reshape(-1)
+                        mean_lum = float((flat[0::3].mean() + flat[1::3].mean()) / 2) + 1e-6
+                    else:  # 10-bit packed: 4 coarse bytes per 5-byte group
+                        tight = frame_data[0][:, : (width // 4) * 5]
+                        flat = tight.reshape(-1)
+                        coarse = flat[: len(flat) // 5 * 5].reshape(-1, 5)[:, :4]
+                        mean_lum = float(coarse.mean()) + 1e-6
+                else:
+                    mean_lum = float(np.mean(frame_data)) + 1e-6
+                new_gain = tl_gain * (auto_gain_target / mean_lum) ** 0.3
+                tl_gain = await loop.run_in_executor(
+                    None, camera.set_gain_transient,
+                    max(1.0, min(auto_gain_max, new_gain))
+                )
+                log.debug("TL auto-gain frame=%d lum=%.1f gain=%.2f", frame_count, mean_lum, tl_gain)
+
             log.debug("TL frame %d interval=%dms", frame_count, interval_ms)
 
             # Wait for previous save only AFTER capture — if save is slower than
@@ -356,14 +405,26 @@ async def run_timelapse(camera: Any, app: Any, params: dict) -> None:
             # Broadcast at most every 5 s
             if t_now - last_broadcast >= 5.0:
                 remaining = max(0, int((end_dt - datetime.now()).total_seconds()))
-                await _broadcast(app, {
+                bcast: dict = {
                     "cmd": "tl_frame",
                     "frame": frame_count,
                     "session": session_id,
                     "remaining_s": remaining,
                     "interval_ms": interval_ms,
-                })
+                }
+                if auto_gain:
+                    bcast["gain"] = round(tl_gain, 2)
+                await _broadcast(app, bcast)
                 last_broadcast = t_now
+
+            # Pad out to the requested interval — subtract time already spent
+            # on capture (t_now - t_last_capture) so the interval measures
+            # start-to-start, not exposure-plus-sleep.
+            if interval_s > 0:
+                elapsed = time.monotonic() - t_now
+                sleep_s = interval_s - elapsed
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
 
         if save_fut is not None:
             await save_fut

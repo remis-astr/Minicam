@@ -9,7 +9,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 GADGET_DIR = Path("/sys/kernel/config/usb_gadget/minicam")
-USB_IP = "192.168.7.2"
+USB_IP = "192.168.7.3"
 HOST_IP = "192.168.7.1"
 
 

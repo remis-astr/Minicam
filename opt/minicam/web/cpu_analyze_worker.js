@@ -92,6 +92,34 @@ function sharpnessAndGray(rgba, w, h) {
     return { sharpness, gray8 };
 }
 
+// ── Décodage JPEG/PNG (déjà débayerisé côté ISP) ───────────────────────────
+// Retourne { sharpness, float32Buffer, packedGrayBuffer, width, height },
+// même forme que le chemin Bayer ci-dessus — décodage via createImageBitmap
+// (dispo dans les module workers) + OffscreenCanvas, pas de debayer() ici.
+async function analyzeImageBytes(bytes, mimeType, cropSize) {
+    const blob   = new Blob([bytes], { type: mimeType });
+    const bitmap = await createImageBitmap(blob);
+    const srcW = bitmap.width, srcH = bitmap.height;
+    const cropW = Math.min(cropSize ?? srcW, srcW);
+    const cropH = Math.min(cropSize ?? srcH, srcH);
+    const cropX = Math.max(0, Math.round((srcW - cropW) / 2));
+    const cropY = Math.max(0, Math.round((srcH - cropH) / 2));
+
+    const canvas = new OffscreenCanvas(cropW, cropH);
+    const ctx    = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+    bitmap.close();
+    const { data: rgba8 } = ctx.getImageData(0, 0, cropW, cropH);
+
+    const n   = cropW * cropH;
+    const rgba = new Float32Array(n * 4);
+    const inv  = 1 / 255;
+    for (let i = 0; i < n * 4; i++) rgba[i] = rgba8[i] * inv;
+
+    const { sharpness, gray8 } = sharpnessAndGray(rgba, cropW, cropH);
+    return { sharpness, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: cropW, height: cropH };
+}
+
 // ── Message handler ─────────────────────────────────────────────────────────
 self.onmessage = ({ data }) => {
     if (!data) return;
@@ -99,6 +127,25 @@ self.onmessage = ({ data }) => {
     if (data.type === 'init') {
         initialized = true;
         self.postMessage({ type: 'ready' });
+        return;
+    }
+
+    if (data.type === 'image-analyze') {
+        if (!initialized) {
+            self.postMessage({ type: 'image-analyze-error', error: 'Not initialized', requestId: data.requestId });
+            return;
+        }
+        const { bytes, mimeType, cropSize, requestId } = data;
+        analyzeImageBytes(bytes, mimeType, cropSize)
+            .then((result) => {
+                self.postMessage(
+                    { type: 'image-analyze-result', requestId, result },
+                    [result.float32Buffer, result.packedGrayBuffer]
+                );
+            })
+            .catch((error) => {
+                self.postMessage({ type: 'image-analyze-error', error: String(error), requestId });
+            });
         return;
     }
 

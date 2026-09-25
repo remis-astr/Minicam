@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galerie Photos — MiniCam</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
+.back-link:hover { color: #adf; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Galerie Photos</h1>
+  <a href="/" class="back-link">&larr; MiniCam</a>
+</header>
+
+<main>
+  <section class="gallery-section">
+    <div class="gallery-header">
+      <h3 class="section-title">Photos</h3>
+      <div class="gallery-actions">
+        <button id="btn-photos-refresh" class="btn-small">&#8635; Actualiser</button>
+        <button id="btn-photos-purge" class="btn-small btn-danger-sm">&#128465; Tout supprimer</button>
+      </div>
+    </div>
+    <div id="photos-disk" class="gallery-disk"></div>
+    <div id="photos-empty" class="gallery-empty hidden">Aucune photo.</div>
+    <div id="photos-list" class="gallery-list"></div>
+  </section>
+</main>
+
+<div id="viewer-overlay" class="viewer-overlay hidden">
+  <div class="viewer-topbar">
+    <span id="viewer-title" class="viewer-title"></span>
+    <span id="viewer-counter" class="viewer-counter"></span>
+    <button id="btn-viewer-close" class="viewer-close-btn">&#10005;</button>
+  </div>
+  <div class="viewer-imgwrap">
+    <button id="btn-viewer-prev" class="viewer-nav viewer-nav-prev">&#10094;</button>
+    <img id="viewer-img" class="viewer-img" src="" alt="">
+    <button id="btn-viewer-next" class="viewer-nav viewer-nav-next">&#10095;</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const elPhotosList       = document.getElementById('photos-list');
+const elPhotosEmpty      = document.getElementById('photos-empty');
+const elPhotosDisk       = document.getElementById('photos-disk');
+const elBtnPhotosRefresh = document.getElementById('btn-photos-refresh');
+const elBtnPhotosPurge   = document.getElementById('btn-photos-purge');
+
+function _fmtDateFromEpoch(t) {
+  if (!t) return '—';
+  const d = new Date(t * 1000);
+  return d.toLocaleDateString('fr-FR') + ' ' + d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+}
+
+async function _loadPhotosGallery() {
+  try {
+    const [resp, diskResp] = await Promise.all([
+      fetch('/photos/list'),
+      fetch('/photos/disk'),
+    ]);
+    const photos = await resp.json();
+
+    if (diskResp.ok) {
+      const d = await diskResp.json();
+      const freePct = 100 - d.used_pct;
+      elPhotosDisk.textContent = `Carte SD : ${d.free_gb} Go libres / ${d.total_gb} Go (${freePct}% libre)`;
+      elPhotosDisk.className = 'gallery-disk' + (freePct < 5 ? ' disk-crit' : freePct < 15 ? ' disk-warn' : '');
+    }
+    elPhotosList.innerHTML = '';
+    if (photos.length === 0) {
+      elPhotosEmpty.classList.remove('hidden');
+      return;
+    }
+    elPhotosEmpty.classList.add('hidden');
+    const filenames = photos.map(p => p.filename);
+    photos.forEach((p, i) => {
+      const card = document.createElement('div');
+      card.className = 'gallery-card';
+      card.dataset.idx = i + 1;
+      card.innerHTML = `
+        <img class="gallery-thumb" src="/photos/thumb/${p.filename}" alt="">
+        <div class="gallery-info">
+          <div class="gallery-info-title">${p.filename}</div>
+          <div class="gallery-info-meta">
+            ${p.type.toUpperCase()} &bull; ${p.size_mb} Mo<br>
+            ${_fmtDateFromEpoch(p.mtime)}
+          </div>
+        </div>
+        <button class="gallery-del" data-filename="${p.filename}" title="Supprimer">&#10005;</button>
+      `;
+      elPhotosList.appendChild(card);
+    });
+
+    elPhotosList.querySelectorAll('.gallery-del').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const fn = btn.dataset.filename;
+        if (!confirm(`Supprimer ${fn} ?`)) return;
+        const r = await fetch(`/photos/${fn}`, { method: 'DELETE' });
+        if (r.ok) _loadPhotosGallery();
+      });
+    });
+
+    elPhotosList.querySelectorAll('.gallery-card').forEach(card => {
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', e => {
+        if (e.target.classList.contains('gallery-del')) return;
+        _openViewer(filenames, parseInt(card.dataset.idx, 10));
+      });
+    });
+  } catch (e) {
+    elPhotosEmpty.textContent = 'Erreur de chargement.';
+    elPhotosEmpty.classList.remove('hidden');
+  }
+}
+
+elBtnPhotosRefresh.addEventListener('click', _loadPhotosGallery);
+
+elBtnPhotosPurge.addEventListener('click', async () => {
+  if (!confirm('Supprimer toutes les photos ?')) return;
+  await fetch('/photos', { method: 'DELETE' });
+  _loadPhotosGallery();
+});
+
+_loadPhotosGallery();
+
+// --- Viewer ---
+
+const elViewerOverlay  = document.getElementById('viewer-overlay');
+const elViewerImg      = document.getElementById('viewer-img');
+const elViewerCounter  = document.getElementById('viewer-counter');
+const elViewerTitle    = document.getElementById('viewer-title');
+const elBtnViewerPrev  = document.getElementById('btn-viewer-prev');
+const elBtnViewerNext  = document.getElementById('btn-viewer-next');
+const elBtnViewerClose = document.getElementById('btn-viewer-close');
+
+let _viewerFiles = [];
+let _viewerIdx   = 1;
+let _viewerCount = 0;
+
+function _openViewer(filenames, startIdx) {
+  if (filenames.length === 0) return;
+  _viewerFiles = filenames;
+  _viewerCount = filenames.length;
+  _viewerIdx   = Math.min(Math.max(startIdx || 1, 1), _viewerCount);
+  elViewerTitle.textContent = 'Photos';
+  elViewerOverlay.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  _viewerLoad();
+}
+
+function _viewerLoad() {
+  const fn = _viewerFiles[_viewerIdx - 1];
+  elViewerImg.src = `/photos/file/${fn}`;
+  elViewerCounter.textContent = `${_viewerIdx} / ${_viewerCount}`;
+  elBtnViewerPrev.disabled = (_viewerIdx <= 1);
+  elBtnViewerNext.disabled = (_viewerIdx >= _viewerCount);
+  if (_viewerIdx < _viewerCount) new Image().src = `/photos/file/${_viewerFiles[_viewerIdx]}`;
+}
+
+function _closeViewer() {
+  elViewerOverlay.classList.add('hidden');
+  elViewerImg.src = '';
+  document.body.style.overflow = '';
+}
+
+elBtnViewerClose.addEventListener('click', _closeViewer);
+elBtnViewerPrev.addEventListener('click', () => { if (_viewerIdx > 1) { _viewerIdx--; _viewerLoad(); } });
+elBtnViewerNext.addEventListener('click', () => { if (_viewerIdx < _viewerCount) { _viewerIdx++; _viewerLoad(); } });
+
+elViewerOverlay.addEventListener('click', e => {
+  if (e.target === elViewerOverlay) _closeViewer();
+});
+
+document.addEventListener('keydown', e => {
+  if (elViewerOverlay.classList.contains('hidden')) return;
+  if (e.key === 'Escape') _closeViewer();
+  if (e.key === 'ArrowLeft'  && _viewerIdx > 1)            { _viewerIdx--; _viewerLoad(); }
+  if (e.key === 'ArrowRight' && _viewerIdx < _viewerCount) { _viewerIdx++; _viewerLoad(); }
+});
+</script>
+</body>
+</html>

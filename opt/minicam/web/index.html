@@ -13,22 +13,38 @@
 </header>
 
 <main>
+  <div id="camera-error-banner" class="camera-error-banner hidden"></div>
+
   <section class="preview-box" id="preview-box">
     <canvas id="preview-canvas"></canvas>
     <canvas id="hist-canvas" class="hist-overlay hidden"></canvas>
+    <canvas id="focus-reticle-canvas" class="hist-overlay hidden"></canvas>
+    <div id="focus-panel" class="focus-panel hidden">
+      <canvas id="focus-zoom-canvas" width="160" height="160"></canvas>
+      <div class="focus-readout">
+        <div class="focus-score-row">
+          <span id="focus-score" class="focus-score">—</span>
+          <span id="focus-peak" class="focus-peak">pic —</span>
+        </div>
+        <div class="focus-bar"><div id="focus-bar-fill" class="focus-bar-fill"></div></div>
+        <button id="btn-focus-reset" class="btn-small">Reset pic</button>
+      </div>
+      <div class="focus-hint">Cliquez sur l'image pour cibler une étoile</div>
+    </div>
+    <button id="btn-focus" class="overlay-btn" title="Aide à la mise au point">🎯</button>
     <button id="btn-histogram" class="overlay-btn" title="Histogramme">▦</button>
     <button id="btn-fullscreen" class="overlay-btn fullscreen-btn" title="Plein écran">⛶</button>
   </section>
 
   <section class="controls">
     <div class="control-row control-row--inline">
-      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
+      <label for="gain-input">Gain <span class="input-hint" id="gain-hint">(1 – 64)</span></label>
       <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" disabled>
     </div>
 
     <div class="control-row control-row--inline">
-      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
-      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" disabled>
+      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 120000)</span></label>
+      <input type="number" id="expo-input" class="value-input" min="0.1" max="120000" step="0.1" disabled>
     </div>
 
     <div class="control-row control-row--inline">
@@ -72,7 +88,7 @@
     </div>
 
     <div class="control-row control-row--inline">
-      <label for="res-select">Résolution</label>
+      <label for="res-select">Mode</label>
       <select id="res-select" disabled></select>
     </div>
 
@@ -103,6 +119,28 @@
       <input type="time" id="tl-end-time" class="value-input" value="06:00">
     </div>
 
+    <div class="control-row control-row--inline">
+      <label for="tl-interval">Intervalle entre images <span class="input-hint">(s, 0 = continu)</span></label>
+      <input type="number" id="tl-interval" class="value-input" min="0" step="1" value="0">
+    </div>
+
+    <div class="control-row">
+      <label class="checkbox-label">
+        <input type="checkbox" id="tl-auto-gain">
+        Gain variable automatique
+      </label>
+    </div>
+    <div id="tl-auto-gain-opts" class="hidden">
+      <div class="control-row control-row--inline">
+        <label for="tl-ag-target">Luminosité cible <span class="input-hint">(0–255)</span></label>
+        <input type="number" id="tl-ag-target" class="value-input" min="10" max="200" step="5" value="80">
+      </div>
+      <div class="control-row control-row--inline">
+        <label for="tl-ag-max">Gain max <span class="input-hint">(1–64)</span></label>
+        <input type="number" id="tl-ag-max" class="value-input" min="1" max="64" step="0.5" value="16">
+      </div>
+    </div>
+
     <div class="button-row">
       <button id="btn-tl-start" disabled>&#9654; Demarrer timelapse</button>
       <button id="btn-tl-stop" class="hidden btn-tl-stop">&#9632; Arreter</button>
@@ -126,6 +164,13 @@
     <div id="gallery-disk" class="gallery-disk"></div>
     <div id="gallery-empty" class="gallery-empty hidden">Aucune session timelapse.</div>
     <div id="gallery-list" class="gallery-list"></div>
+  </section>
+
+  <section class="gallery-section">
+    <div class="gallery-header">
+      <h3 class="section-title">Galerie Photos</h3>
+    </div>
+    <a class="btn" href="/static/photos_gallery.html" target="_blank">&#128247; Ouvrir la galerie photos</a>
   </section>
 
   <section class="astrohopper-section">
@@ -155,21 +200,61 @@
     </div>
   </section>
 
-  <section class="astrohopper-section">
-    <h3 class="section-title">Navigation</h3>
-    <p class="indi-info">AstroHopper utilise le MPU6050 du RPi0 (filtre Madgwick) — pas besoin du gyroscope du smartphone.</p>
+  <section class="wifi-section">
+    <h3 class="section-title">WiFi / Hotspot</h3>
+    <div id="wifi-state" class="wifi-state">—</div>
+    <div id="wifi-ip-row" class="wifi-ip-row hidden">
+      <span id="wifi-ip-bar" class="wifi-ip-bar"></span>
+      <button id="btn-wifi-copy" class="btn-wifi-copy" title="Copier l'adresse">&#10697;</button>
+      <button id="btn-wifi-fixip" class="btn-wifi-fixip" title="Fixer cette IP (connexion toujours sur la même adresse)">Fixer cette IP</button>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="wifi-profile-select">Réseau sauvegardé</label>
+      <select id="wifi-profile-select" class="value-input">
+        <option value="">— Nouveau réseau —</option>
+      </select>
+    </div>
+
+    <div id="wifi-new-fields">
+      <div class="control-row control-row--inline">
+        <label for="wifi-ssid">SSID</label>
+        <input type="text" id="wifi-ssid" class="value-input" placeholder="Nom du réseau"
+               autocomplete="off" autocorrect="off" spellcheck="false">
+      </div>
+
+      <div class="control-row control-row--inline">
+        <label for="wifi-pass">Mot de passe</label>
+        <input type="password" id="wifi-pass" class="value-input" placeholder="">
+      </div>
+    </div>
+
     <div class="button-row">
-      <a class="btn btn-astro" href="/astrohopper/astrohopper.html" target="_blank">&#9733; Ouvrir AstroHopper</a>
+      <button id="btn-wifi-connect">&#8644; Connecter</button>
+      <button id="btn-wifi-disconnect">&#10006; Déconnecter</button>
     </div>
   </section>
 
   <section class="sys-section">
     <h3 class="section-title">Système</h3>
     <div class="button-row">
+      <button id="btn-led-on">&#9728; LED on</button>
+      <button id="btn-led-off">&#9788; LED off</button>
+    </div>
+    <div id="led-status" class="sys-status"></div>
+    <div class="button-row">
       <button id="btn-reboot" class="btn-warning">↺ Redémarrer</button>
       <button id="btn-shutdown" class="btn-danger">⏻ Éteindre</button>
     </div>
     <div id="sys-status" class="sys-status"></div>
+
+    <div class="control-row control-row--inline">
+      <label for="sensor-select">Capteur</label>
+      <select id="sensor-select"></select>
+      <button id="btn-sensor-apply" class="btn-warning">Appliquer (redémarrage)</button>
+    </div>
+    <p class="indi-info">Assure-toi d'avoir physiquement branché le bon capteur avant d'appliquer — un mauvais appariement rend la caméra indisponible jusqu'à correction.</p>
+    <div id="sensor-status" class="sys-status"></div>
   </section>
 </main>
 

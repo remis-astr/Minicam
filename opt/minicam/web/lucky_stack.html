@@ -80,6 +80,15 @@
     <h3 class="section-title">Lucky Stack</h3>
 
     <div class="control-row control-row--inline">
+      <label for="format-select">Format</label>
+      <select id="format-select">
+        <option value="raw" selected>RAW (Bayer, précis)</option>
+        <option value="jpeg">JPEG (ISP, léger)</option>
+        <option value="png">PNG (ISP, sans perte)</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline" id="bitdepth-row">
       <label for="bitdepth-select">Profondeur</label>
       <select id="bitdepth-select">
         <option value="16" selected>16-bit (qualité)</option>
@@ -116,6 +125,27 @@
       <span class="range-val" id="align-radius-val">32 px</span>
     </div>
 
+    <div class="control-row control-row--inline">
+      <label for="awb-toggle">Balance des blancs auto <span class="input-hint">(sur l'image stackée)</span></label>
+      <input type="checkbox" id="awb-toggle" checked style="width:auto;">
+    </div>
+
+    <div class="range-row">
+      <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
+      <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+      <span class="range-val" id="stretch-lo-val">0.1 %</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
+      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="5">
+      <span class="range-val" id="stretch-beta-val">5</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-hi">Saturation <span class="input-hint">(percentile blanc)</span></label>
+      <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
+      <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+
     <div class="button-row">
       <button id="btn-start" class="btn-green">▶ Démarrer</button>
       <button id="btn-stop" class="hidden">■ Arrêter</button>
@@ -144,9 +174,18 @@ const elStats      = document.getElementById('stats');
 const elGain       = document.getElementById('gain-input');
 const elExpo       = document.getElementById('expo-input');
 const elSync       = document.getElementById('sync-camera');
+const elFormat     = document.getElementById('format-select');
+const elBitDepthRow = document.getElementById('bitdepth-row');
 const elQuality    = document.getElementById('quality-slider');
 const elQualityVal = document.getElementById('quality-val');
 const elAlignMode  = document.getElementById('align-mode');
+const elAwb        = document.getElementById('awb-toggle');
+const elStretchLo    = document.getElementById('stretch-lo');
+const elStretchLoVal = document.getElementById('stretch-lo-val');
+const elStretchBeta  = document.getElementById('stretch-beta');
+const elStretchBetaVal = document.getElementById('stretch-beta-val');
+const elStretchHi    = document.getElementById('stretch-hi');
+const elStretchHiVal = document.getElementById('stretch-hi-val');
 const btnStart     = document.getElementById('btn-start');
 const btnStop      = document.getElementById('btn-stop');
 const btnReset     = document.getElementById('btn-reset');
@@ -216,6 +255,33 @@ elAlignRadius.addEventListener('input', () => {
     if (stacker) stacker.setSearchRadius(v);
 });
 
+elAwb.addEventListener('change', () => {
+    if (stacker) stacker.setAWB(elAwb.checked);
+});
+
+function stretchValues() {
+    return {
+        lo:   parseFloat(elStretchLo.value)   / 100,
+        hi:   parseFloat(elStretchHi.value)   / 100,
+        beta: parseFloat(elStretchBeta.value),
+    };
+}
+elStretchLo.addEventListener('input', () => {
+    elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    stacker?.setStretch(lo, hi, beta);
+});
+elStretchBeta.addEventListener('input', () => {
+    const v = parseFloat(elStretchBeta.value);
+    elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
+    stacker?.setStretchBeta(v);
+});
+elStretchHi.addEventListener('input', () => {
+    elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    stacker?.setStretch(lo, hi, beta);
+});
+
 const elBitDepth = document.getElementById('bitdepth-select');
 elBitDepth.addEventListener('change', () => {
     if (stacker) {
@@ -224,6 +290,12 @@ elBitDepth.addEventListener('change', () => {
         if (stacker._initialized) stacker.reset();
     }
 });
+
+elFormat.addEventListener('change', () => {
+    elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
+    if (stacker) stacker.setFormat(elFormat.value);
+});
+elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
 
 const elRoi = document.getElementById('roi-select');
 elRoi.addEventListener('change', () => {
@@ -263,6 +335,7 @@ btnStart.addEventListener('click', async () => {
     elAlignRadius.disabled = true;
     elBitDepth.disabled    = true;
     elRoi.disabled         = true;
+    elFormat.disabled      = true;
     stacker = new StreamingStacker({
         mode:    'lucky',
         canvas,
@@ -272,6 +345,11 @@ btnStart.addEventListener('click', async () => {
             searchRadius:     parseInt(elAlignRadius.value),
             bitDepth:         parseInt(elBitDepth.value),
             roi:              parseRoi(elRoi.value),
+            format:           elFormat.value,
+            awb:              elAwb.checked,
+            stretchLow:       parseFloat(elStretchLo.value) / 100,
+            stretchHigh:      parseFloat(elStretchHi.value) / 100,
+            stretchBeta:      parseFloat(elStretchBeta.value),
         },
     });
 
@@ -310,6 +388,7 @@ btnStop.addEventListener('click', () => {
     elAlignRadius.disabled = false;
     elBitDepth.disabled    = false;
     elRoi.disabled         = false;
+    elFormat.disabled      = false;
     elStatus.className   = 'badge disconnected';
     elStatus.textContent = 'Déconnecté';
     _resetUI();

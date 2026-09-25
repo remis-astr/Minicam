@@ -7,6 +7,7 @@ let reconnectTimer = null;
 
 const elStatus      = document.getElementById('ws-status');
 const elGainInput   = document.getElementById('gain-input');
+const elGainHint    = document.getElementById('gain-hint');
 const elExpoInput   = document.getElementById('expo-input');
 const elWbRedInput       = document.getElementById('wb-red-input');
 const elWbBlueInput      = document.getElementById('wb-blue-input');
@@ -16,6 +17,7 @@ const elSaturationInput  = document.getElementById('saturation-input');
 const elBrightnessInput  = document.getElementById('brightness-input');
 const elNrInput          = document.getElementById('nr-input');
 const elResSelect        = document.getElementById('res-select');
+const elCameraErrorBanner = document.getElementById('camera-error-banner');
 const elReconnect   = document.getElementById('btn-reconnect');
 const elStatusBar   = document.getElementById('status-bar');
 
@@ -51,6 +53,7 @@ function connect() {
     elStatus.className  = 'badge connected';
     elStatus.textContent = 'Connecté';
     setStatus('Connecté');
+    syncClock();
     send({ cmd: 'status' });
     send({ cmd: 'indi_status' });
     send({ cmd: 'timelapse_status' });
@@ -60,23 +63,35 @@ function connect() {
     const msg = JSON.parse(ev.data);
 
     if (msg.cmd === 'status' || msg.cmd === 'ack') {
+      if (msg.camera_error !== undefined) {
+        if (msg.camera_error) {
+          elCameraErrorBanner.textContent = 'Caméra indisponible : ' + msg.camera_error;
+          elCameraErrorBanner.classList.remove('hidden');
+        } else {
+          elCameraErrorBanner.classList.add('hidden');
+        }
+      }
+      if (msg.gain_max !== undefined) {
+        elGainInput.max = msg.gain_max;
+        elGainHint.textContent = `(1 – ${msg.gain_max})`;
+      }
       if (msg.gain !== undefined) {
         elGainInput.value = parseFloat(msg.gain).toFixed(1);
         elGainInput.classList.remove('input-error');
-        setControls(true);
       }
+      if (msg.open !== undefined) setControls(msg.open);
       if (msg.exposure_ms !== undefined) {
         elExpoInput.value = parseFloat(msg.exposure_ms).toFixed(1);
         elExpoInput.classList.remove('input-error');
       }
-      if (msg.resolutions && elResSelect.options.length === 0) {
-        msg.resolutions.forEach(r => {
+      if (msg.raw_modes && elResSelect.options.length === 0) {
+        msg.raw_modes.forEach(r => {
           const o = document.createElement('option');
           o.value = o.textContent = r;
           elResSelect.appendChild(o);
         });
       }
-      if (msg.resolution !== undefined) elResSelect.value = msg.resolution;
+      if (msg.raw_mode !== undefined) elResSelect.value = msg.raw_mode;
       if (msg.wb_red !== undefined) {
         elWbBlueInput.value = parseFloat(msg.wb_red).toFixed(2);
         elWbBlueInput.classList.remove('input-error');
@@ -120,6 +135,17 @@ function send(obj) {
     ws.send(JSON.stringify(obj));
 }
 
+// Le minicam n'a pas d'horloge temps réel matérielle : en mode hotspot il
+// n'a jamais d'accès Internet pour se synchroniser en NTP. Le navigateur a
+// en général l'heure correcte, donc on la lui transmet à chaque connexion.
+function syncClock() {
+  fetch('/system/time', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ epoch_ms: Date.now() }),
+  }).catch(() => {});
+}
+
 // --- Champs de saisie avec validation ---
 
 function attachValueInput(el, min, max, onValid) {
@@ -138,7 +164,7 @@ function attachValueInput(el, min, max, onValid) {
 
 attachValueInput(elGainInput, 1, 64, v => send({ cmd: 'set_gain', value: v }));
 
-attachValueInput(elExpoInput, 0.1, 10000, v => send({ cmd: 'set_exposure', value_ms: v }));
+attachValueInput(elExpoInput, 0.1, 120000, v => send({ cmd: 'set_exposure', value_ms: v }));
 
 function sendWb() {
   send({ cmd: 'set_wb', red: parseFloat(elWbBlueInput.value), blue: parseFloat(elWbRedInput.value) });
@@ -165,8 +191,8 @@ attachValueInput(elBrightnessInput, -1,  1, () => sendIsp());
 elNrInput.addEventListener('change', sendIsp);
 
 elResSelect.addEventListener('change', () => {
-  send({ cmd: 'set_resolution', value: elResSelect.value });
-  setStatus('Changement de résolution…');
+  send({ cmd: 'set_mode', value: elResSelect.value });
+  setStatus('Changement de mode…');
 });
 
 // --- Fullscreen ---
@@ -312,6 +338,128 @@ function toggleHistogram() {
 
 elHistBtn.addEventListener('click', toggleHistogram);
 
+// --- Focus assist (client-side only) ---
+// Score = énergie de gradient moyenne dans une zone recadrée/zoomée, en ne
+// comptant que les pixels au-dessus d'un seuil de luminance — ignore le
+// bruit de fond du ciel nocturne pour ne suivre que la netteté de l'étoile
+// (ou du sujet) ciblée. Fonctionne identiquement sur les deux capteurs
+// puisqu'il n'analyse que l'image ISP déjà affichée, jamais le RAW.
+
+const elFocusBtn         = document.getElementById('btn-focus');
+const elFocusPanel       = document.getElementById('focus-panel');
+const elFocusZoomCanvas  = document.getElementById('focus-zoom-canvas');
+const focusZoomCtx       = elFocusZoomCanvas.getContext('2d');
+const elFocusReticle     = document.getElementById('focus-reticle-canvas');
+const elFocusScore       = document.getElementById('focus-score');
+const elFocusPeak        = document.getElementById('focus-peak');
+const elFocusBarFill     = document.getElementById('focus-bar-fill');
+const elBtnFocusReset    = document.getElementById('btn-focus-reset');
+
+let focusEnabled  = false;
+let focusTimer    = null;
+let focusPeak     = 0;
+let focusRoi      = { x: 0.5, y: 0.5 };  // fraction du canvas, 0-1
+const FOCUS_LUMA_THRESHOLD = 40;         // ignore le bruit de fond noir du ciel
+const FOCUS_CROP_FRACTION  = 0.12;       // taille de la zone recadrée (% du plus petit côté)
+
+function _cropRect() {
+  const w = elPreviewCanvas.width, h = elPreviewCanvas.height;
+  const size = Math.max(8, Math.round(Math.min(w, h) * FOCUS_CROP_FRACTION));
+  const cx = focusRoi.x * w, cy = focusRoi.y * h;
+  const x = Math.max(0, Math.min(w - size, Math.round(cx - size / 2)));
+  const y = Math.max(0, Math.min(h - size, Math.round(cy - size / 2)));
+  return { x, y, size };
+}
+
+function _sharpnessScore(data, w, h) {
+  let sum = 0, count = 0;
+  for (let y = 0; y < h - 1; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      if (lum < FOCUS_LUMA_THRESHOLD) continue;
+      const iR = i + 4, iD = i + w * 4;
+      const lumR = 0.299 * data[iR] + 0.587 * data[iR + 1] + 0.114 * data[iR + 2];
+      const lumD = 0.299 * data[iD] + 0.587 * data[iD + 1] + 0.114 * data[iD + 2];
+      const gx = lum - lumR, gy = lum - lumD;
+      sum += gx * gx + gy * gy;
+      count++;
+    }
+  }
+  return count > 0 ? sum / count : 0;
+}
+
+function _drawReticle() {
+  elFocusReticle.width  = elPreviewCanvas.width;
+  elFocusReticle.height = elPreviewCanvas.height;
+  const ctx = elFocusReticle.getContext('2d');
+  ctx.clearRect(0, 0, elFocusReticle.width, elFocusReticle.height);
+  const { x, y, size } = _cropRect();
+  ctx.strokeStyle = 'rgba(255,179,0,0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x + 0.5, y + 0.5, size, size);
+}
+
+function updateFocus() {
+  if (!focusEnabled) return;
+  try {
+    if (elPreviewCanvas.width > 0 && elPreviewCanvas.height > 0) {
+      const { x, y, size } = _cropRect();
+      const imgData = previewCtx.getImageData(x, y, size, size);
+      const score = _sharpnessScore(imgData.data, size, size);
+      focusPeak = Math.max(focusPeak, score);
+
+      focusZoomCtx.imageSmoothingEnabled = false;
+      focusZoomCtx.clearRect(0, 0, elFocusZoomCanvas.width, elFocusZoomCanvas.height);
+      focusZoomCtx.drawImage(
+        elPreviewCanvas, x, y, size, size,
+        0, 0, elFocusZoomCanvas.width, elFocusZoomCanvas.height
+      );
+
+      elFocusScore.textContent = score.toFixed(1);
+      elFocusPeak.textContent = 'pic ' + focusPeak.toFixed(1);
+      const fillPct = focusPeak > 0 ? Math.min(100, (score / focusPeak) * 100) : 0;
+      elFocusBarFill.style.width = fillPct + '%';
+      elFocusBarFill.style.background = score >= focusPeak && focusPeak > 0 ? '#ffb300' : '#4caf50';
+      _drawReticle();
+    }
+  } catch (e) {
+    console.error('Focus assist error:', e);
+  } finally {
+    if (focusEnabled) focusTimer = setTimeout(updateFocus, 150);
+  }
+}
+
+function toggleFocus() {
+  focusEnabled = !focusEnabled;
+  elFocusBtn.classList.toggle('active', focusEnabled);
+  if (focusEnabled) {
+    focusPeak = 0;
+    elFocusPanel.classList.remove('hidden');
+    elFocusReticle.classList.remove('hidden');
+    updateFocus();  // se replanifie via setTimeout
+  } else {
+    clearTimeout(focusTimer);
+    elFocusPanel.classList.add('hidden');
+    elFocusReticle.classList.add('hidden');
+    elFocusReticle.getContext('2d').clearRect(0, 0, elFocusReticle.width, elFocusReticle.height);
+  }
+}
+
+elFocusBtn.addEventListener('click', toggleFocus);
+
+elBtnFocusReset.addEventListener('click', () => { focusPeak = 0; });
+
+elPreviewCanvas.addEventListener('click', (e) => {
+  if (!focusEnabled) return;
+  const rect = elPreviewCanvas.getBoundingClientRect();
+  focusRoi = {
+    x: (e.clientX - rect.left) / rect.width,
+    y: (e.clientY - rect.top) / rect.height,
+  };
+  focusPeak = 0;
+});
+
 window.addEventListener('resize', resizePreviewCanvas);
 
 // --- INDI mode ---
@@ -388,20 +536,86 @@ async function sysAction(action, label) {
 elBtnReboot.addEventListener('click',   () => sysAction('reboot',   'Redémarrage'));
 elBtnShutdown.addEventListener('click', () => sysAction('shutdown', 'Arrêt'));
 
+// --- Capteur ---
+
+const elSensorSelect    = document.getElementById('sensor-select');
+const elBtnSensorApply  = document.getElementById('btn-sensor-apply');
+const elSensorStatus    = document.getElementById('sensor-status');
+
+async function _sensorRefresh() {
+  try {
+    const r = await fetch('/system/sensor');
+    const j = await r.json();
+    if (!j.ok) return;
+    if (elSensorSelect.options.length === 0) {
+      j.sensors.forEach(s => {
+        const o = document.createElement('option');
+        o.value = o.textContent = s;
+        elSensorSelect.appendChild(o);
+      });
+    }
+    elSensorSelect.value = j.sensor;
+  } catch (_) {}
+}
+
+elBtnSensorApply.addEventListener('click', async () => {
+  const sensor = elSensorSelect.value;
+  if (!confirm(
+    `Confirmer le passage au capteur ${sensor} ?\n` +
+    `Le Pi0 va redémarrer. Assure-toi d'avoir déjà branché physiquement ce capteur.`
+  )) return;
+  elBtnSensorApply.disabled = true;
+  elSensorStatus.textContent = 'Application en cours…';
+  try {
+    const r = await fetch('/system/sensor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sensor }),
+    });
+    const j = await r.json();
+    elSensorStatus.textContent = j.ok
+      ? `Capteur ${j.sensor} appliqué — redémarrage en cours.`
+      : `Erreur : ${j.detail}`;
+    if (!j.ok) elBtnSensorApply.disabled = false;
+  } catch (e) {
+    elSensorStatus.textContent = `Erreur : ${e}`;
+    elBtnSensorApply.disabled = false;
+  }
+});
+
+_sensorRefresh();
+
 // --- Timelapse ---
 
-const elTlMode    = document.getElementById('tl-mode');
-const elTlEndTime = document.getElementById('tl-end-time');
+const elTlMode       = document.getElementById('tl-mode');
+const elTlEndTime    = document.getElementById('tl-end-time');
+const elTlInterval   = document.getElementById('tl-interval');
 const elBtnTlStart   = document.getElementById('btn-tl-start');
 const elBtnTlStop    = document.getElementById('btn-tl-stop');
 const elTlStatus     = document.getElementById('tl-status');
 const elTlPreviewBox = document.getElementById('tl-preview-box');
 const elTlPreviewImg = document.getElementById('tl-preview-img');
+const elTlAutoGain   = document.getElementById('tl-auto-gain');
+const elTlAutoGainOpts = document.getElementById('tl-auto-gain-opts');
+const elTlAgTarget   = document.getElementById('tl-ag-target');
+const elTlAgMax      = document.getElementById('tl-ag-max');
+
+elTlAutoGain.addEventListener('change', () => {
+  elTlAutoGainOpts.classList.toggle('hidden', !elTlAutoGain.checked);
+});
 
 let tlPreviewTimer = null;
 
 elBtnTlStart.addEventListener('click', () => {
-  send({ cmd: 'start_timelapse', mode: elTlMode.value, end_time: elTlEndTime.value });
+  const msg = { cmd: 'start_timelapse', mode: elTlMode.value, end_time: elTlEndTime.value };
+  const intervalS = parseFloat(elTlInterval.value) || 0;
+  if (intervalS > 0) msg.interval_s = intervalS;
+  if (elTlAutoGain.checked) {
+    msg.auto_gain        = true;
+    msg.auto_gain_target = parseFloat(elTlAgTarget.value) || 80;
+    msg.auto_gain_max    = parseFloat(elTlAgMax.value)    || 16;
+  }
+  send(msg);
 });
 
 elBtnTlStop.addEventListener('click', () => {
@@ -435,9 +649,10 @@ function _onTlFrame(msg) {
   const rem = msg.remaining_s || 0;
   const h = Math.floor(rem / 3600);
   const m = Math.floor((rem % 3600) / 60);
+  const gainInfo = msg.gain !== undefined ? ` | gain ${msg.gain}` : '';
   elTlStatus.textContent =
     `En cours — ${msg.frame} images | fin dans ${h}h${String(m).padStart(2,'0')} | ` +
-    `intervalle ${msg.interval_ms} ms`;
+    `intervalle ${msg.interval_ms} ms${gainInfo}`;
 }
 
 function _onTlDone(msg) {
@@ -635,6 +850,195 @@ function _attachViewerToCards() {
 }
 
 new MutationObserver(_attachViewerToCards).observe(elGalleryList, { childList: true });
+
+// --- LED verte RPi ---
+
+const elBtnLedOn  = document.getElementById('btn-led-on');
+const elBtnLedOff = document.getElementById('btn-led-off');
+const elLedStatus = document.getElementById('led-status');
+
+function _ledSetUI(on) {
+  elBtnLedOn.disabled  = on === true;
+  elBtnLedOff.disabled = on === false;
+  elLedStatus.textContent = on === null ? '' : on ? 'LED allumee' : 'LED eteinte';
+}
+
+async function _ledAction(state) {
+  elBtnLedOn.disabled  = true;
+  elBtnLedOff.disabled = true;
+  elLedStatus.textContent = '…';
+  try {
+    const r = await fetch(`/system/led/${state}`, { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) _ledSetUI(j.on);
+    else elLedStatus.textContent = 'Erreur : ' + j.detail;
+  } catch (e) {
+    elLedStatus.textContent = 'Erreur : ' + e;
+    _ledSetUI(null);
+  }
+}
+
+elBtnLedOn.addEventListener('click',  () => _ledAction('on'));
+elBtnLedOff.addEventListener('click', () => _ledAction('off'));
+
+fetch('/system/led').then(r => r.json()).then(j => { if (j.ok) _ledSetUI(j.on); }).catch(() => {});
+
+// --- WiFi / Hotspot ---
+
+const elWifiState         = document.getElementById('wifi-state');
+const elWifiIpRow         = document.getElementById('wifi-ip-row');
+const elWifiIpBar         = document.getElementById('wifi-ip-bar');
+const elBtnWifiCopy       = document.getElementById('btn-wifi-copy');
+const elBtnWifiFixip      = document.getElementById('btn-wifi-fixip');
+const elWifiProfileSelect = document.getElementById('wifi-profile-select');
+const elWifiNewFields     = document.getElementById('wifi-new-fields');
+const elWifiSsid          = document.getElementById('wifi-ssid');
+const elWifiPass          = document.getElementById('wifi-pass');
+const elBtnWifiConn       = document.getElementById('btn-wifi-connect');
+const elBtnWifiDisc       = document.getElementById('btn-wifi-disconnect');
+
+function _wifiSetUI(st) {
+  if (st.connected && st.ip) {
+    const label = st.ip_method === 'static' ? `IP fixe — ${st.ssid}` : `Connecte — ${st.ssid}`;
+    elWifiState.textContent = label;
+    elWifiState.className = 'wifi-state wifi-ok';
+    elWifiIpBar.textContent = `http://${st.ip}:8000/`;
+    elWifiIpRow.classList.remove('hidden');
+    const fixed = st.ip_method === 'static';
+    elBtnWifiFixip.disabled = fixed;
+    elBtnWifiFixip.textContent = fixed ? 'IP fixee' : 'Fixer cette IP';
+    elBtnWifiFixip.className = fixed ? 'btn-wifi-fixip fixed' : 'btn-wifi-fixip';
+  } else if (st.connected) {
+    elWifiState.textContent = `Connecte — ${st.ssid}`;
+    elWifiState.className = 'wifi-state wifi-ok';
+    elWifiIpRow.classList.add('hidden');
+  } else if (st.enabled) {
+    elWifiState.textContent = 'WiFi actif, non connecte';
+    elWifiState.className = 'wifi-state';
+    elWifiIpRow.classList.add('hidden');
+  } else {
+    elWifiState.textContent = 'WiFi desactive';
+    elWifiState.className = 'wifi-state';
+    elWifiIpRow.classList.add('hidden');
+  }
+}
+
+async function _wifiRefreshProfiles() {
+  try {
+    const r = await fetch('/system/wifi/profiles');
+    const j = await r.json();
+    if (!j.ok) return;
+    const current = elWifiProfileSelect.value;
+    while (elWifiProfileSelect.options.length > 1) elWifiProfileSelect.remove(1);
+    for (const name of j.profiles) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      elWifiProfileSelect.appendChild(opt);
+    }
+    if (j.profiles.includes(current)) elWifiProfileSelect.value = current;
+  } catch (_) {}
+}
+
+async function _wifiRefresh() {
+  try {
+    const r = await fetch('/system/wifi');
+    const j = await r.json();
+    if (j.ok) _wifiSetUI(j);
+  } catch (_) {}
+}
+
+elBtnWifiCopy.addEventListener('click', () => {
+  const url = elWifiIpBar.textContent;
+  if (!url) return;
+  navigator.clipboard.writeText(url).then(() => {
+    const prev = elBtnWifiCopy.textContent;
+    elBtnWifiCopy.textContent = '✓';
+    setTimeout(() => { elBtnWifiCopy.textContent = prev; }, 1500);
+  }).catch(() => {});
+});
+
+elBtnWifiFixip.addEventListener('click', async () => {
+  elBtnWifiFixip.disabled = true;
+  elBtnWifiFixip.textContent = 'En cours…';
+  try {
+    const r = await fetch('/system/wifi/fixip', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) {
+      await _wifiRefresh();
+    } else {
+      elWifiState.textContent = 'Erreur fixip : ' + j.detail;
+      elWifiState.className = 'wifi-state wifi-err';
+      elBtnWifiFixip.disabled = false;
+      elBtnWifiFixip.textContent = 'Fixer cette IP';
+    }
+  } catch (e) {
+    elWifiState.textContent = 'Erreur : ' + e;
+    elWifiState.className = 'wifi-state wifi-err';
+    elBtnWifiFixip.disabled = false;
+    elBtnWifiFixip.textContent = 'Fixer cette IP';
+  }
+});
+
+elWifiProfileSelect.addEventListener('change', () => {
+  const isNew = elWifiProfileSelect.value === '';
+  elWifiNewFields.classList.toggle('hidden', !isNew);
+});
+
+elBtnWifiConn.addEventListener('click', async () => {
+  const profile = elWifiProfileSelect.value;
+  const ssid = profile || elWifiSsid.value.trim();
+  if (!ssid) {
+    elWifiState.textContent = 'Entrez un nom de reseau (SSID)';
+    elWifiState.className = 'wifi-state wifi-err';
+    return;
+  }
+  elBtnWifiConn.disabled = true;
+  elBtnWifiDisc.disabled = true;
+  elWifiState.textContent = 'Connexion en cours…';
+  elWifiState.className = 'wifi-state wifi-busy';
+  try {
+    const r = await fetch('/system/wifi/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid, password: profile ? '' : elWifiPass.value }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      await _wifiRefresh();
+    } else {
+      elWifiState.textContent = 'Erreur : ' + j.detail;
+      elWifiState.className = 'wifi-state wifi-err';
+    }
+  } catch (e) {
+    elWifiState.textContent = 'Erreur : ' + e;
+    elWifiState.className = 'wifi-state wifi-err';
+  } finally {
+    elBtnWifiConn.disabled = false;
+    elBtnWifiDisc.disabled = false;
+  }
+});
+
+elBtnWifiDisc.addEventListener('click', async () => {
+  elBtnWifiConn.disabled = true;
+  elBtnWifiDisc.disabled = true;
+  elWifiState.textContent = 'Deconnexion…';
+  elWifiState.className = 'wifi-state wifi-busy';
+  try {
+    await fetch('/system/wifi/disconnect', { method: 'POST' });
+    await _wifiRefresh();
+  } catch (e) {
+    elWifiState.textContent = 'Erreur : ' + e;
+    elWifiState.className = 'wifi-state wifi-err';
+  } finally {
+    elBtnWifiConn.disabled = false;
+    elBtnWifiDisc.disabled = false;
+  }
+});
+
+_wifiRefreshProfiles();
+_wifiRefresh();
+setInterval(_wifiRefresh, 10_000);
 
 connect();
 runPreview();

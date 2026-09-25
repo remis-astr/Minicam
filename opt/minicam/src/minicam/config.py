@@ -16,7 +16,7 @@ CONFIG_PATH = Path("/etc/minicam/config.toml")
 STATE_PATH = Path("/var/lib/minicam/state.json")
 
 _DEFAULTS: dict[str, Any] = {
-    "camera": {"default_gain": 10.0, "default_exposure_ms": 100.0},
+    "camera": {"sensor": "imx327", "default_gain": 10.0, "default_exposure_ms": 100.0, "binning": False},
     "oled": {"contrast": 20, "auto_sleep_seconds": 60, "rotate": 0, "i2c_address": "0x3C"},
     "network": {"usb_ip": "192.168.7.2", "usb_prefix": 24},
     "api": {"host": "0.0.0.0", "port": 8000},

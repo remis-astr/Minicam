@@ -65,14 +65,43 @@ function meanBrightness(float32Buf, w, h) {
 }
 
 // ---------------------------------------------------------------------------
+// Balance des blancs auto (gray-world) — calculée sur l'image STACKÉE
+// uniquement (jamais par frame brute), sur le même échantillon 1/16 que les
+// percentiles ci-dessous : coût négligeable, appelée une fois par preview.
+// ---------------------------------------------------------------------------
+
+function computeAWBGains(float32Buf, w, h) {
+    const rgba = new Float32Array(float32Buf);
+    const n    = w * h;
+    let sumR = 0, sumG = 0, sumB = 0, count = 0;
+    for (let i = 0; i < n; i += 16) {
+        const r = rgba[i*4], g = rgba[i*4+1], b = rgba[i*4+2];
+        // Ignore le fond quasi noir (bruit de lecture) pour ne pas biaiser
+        // la moyenne — même seuil que meanBrightness().
+        if ((r + g + b) / 3 > 10 / 255) { sumR += r; sumG += g; sumB += b; count++; }
+    }
+    if (count < 10 || sumR <= 0 || sumG <= 0 || sumB <= 0) return [1, 1, 1];
+    const meanR = sumR / count, meanG = sumG / count, meanB = sumB / count;
+    // G comme référence (2× plus de photosites verts sur un capteur Bayer,
+    // donc canal le moins bruité) — gains bornés pour éviter tout emballement
+    // sur un stack encore quasi vide ou très bruité.
+    const clamp = (v) => Math.max(0.5, Math.min(3.0, v));
+    return [clamp(meanG / meanR), 1, clamp(meanG / meanB)];
+}
+
+// ---------------------------------------------------------------------------
 // Preview stretch : percentiles sur échantillon 1/16, LUT arcsinh, rendu canvas
 // ---------------------------------------------------------------------------
 
-function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0) {
+function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
+    const [gR, gG, gB] = awbGains ?? [1, 1, 1];
 
-    // Percentiles de luminance (échantillon 1/16 pour rapidité)
+    // Percentiles de luminance (échantillon 1/16 pour rapidité) — calculés
+    // sur la luminance AVANT balance des blancs : les gains R/B restent
+    // proches de 1 en pratique, donc la plage de stretch n'a pas besoin
+    // d'être recalculée après application des gains.
     const samples = [];
     for (let i = 0; i < n; i += 16) {
         const lum = 0.299 * rgba[i*4] + 0.587 * rgba[i*4+1] + 0.114 * rgba[i*4+2];
@@ -97,13 +126,15 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0) {
 
     // Rendu via LUT (lookup seul par pixel — ~5 ms pour 1920×1080)
     const scale = (LUT - 1) / rng;
+    const gains = [gR, gG, gB];
     canvas.width  = w;
     canvas.height = h;
     const idata = new ImageData(w, h);
     const d     = idata.data;
     for (let i = 0; i < n; i++) {
         for (let ch = 0; ch < 3; ch++) {
-            const idx    = Math.max(0, Math.min(LUT - 1, Math.round((rgba[i*4+ch] - lo) * scale)));
+            const v      = rgba[i*4+ch] * gains[ch];
+            const idx    = Math.max(0, Math.min(LUT - 1, Math.round((v - lo) * scale)));
             d[i*4 + ch]  = lut[idx];
         }
         d[i*4 + 3] = 255;
@@ -140,10 +171,12 @@ export class StreamingStacker extends EventTarget {
         this._targetFps        = options.fps ?? null;
         this._initialRoi       = options.roi ?? null;
         this._initialBitDepth  = options.bitDepth ?? null;
+        this._initialFormat    = options.format ?? 'raw';
         this._stretchLow       = options.stretchLow  ?? 0.001;
         this._stretchHigh      = options.stretchHigh ?? 0.999;
         this._stretchBeta      = options.stretchBeta ?? 0;
         this._previewEveryN    = options.previewEveryN ?? 1;
+        this._awbEnabled       = options.awb ?? false;
 
         // Workers (créés dans start())
         this._analyzeWorker = null;
@@ -212,7 +245,7 @@ export class StreamingStacker extends EventTarget {
 
         this._receiver = new WsFrameReceiver(wsUrl);
         this._receiver.onFrame = (pixels, meta) => this._onFrame(pixels, meta);
-        await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth);
+        await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth, this._initialFormat);
     }
 
     pause()  { this._paused = true; }
@@ -253,6 +286,8 @@ export class StreamingStacker extends EventTarget {
 
     setStretchBeta(beta) { this._stretchBeta = beta; }
 
+    setAWB(enabled) { this._awbEnabled = enabled; }
+
     setAlignMode(mode) {
         if (this._alignMode === mode) return;
         this._alignMode = mode;
@@ -289,6 +324,14 @@ export class StreamingStacker extends EventTarget {
     }
 
     flush(n = 3) { this._receiver?.flush(n); }
+
+    /** Change le format de flux : 'raw' (Bayer), 'jpeg' ou 'png' (ISP). */
+    setFormat(format) {
+        this._initialFormat = format;
+        this._receiver?.setFormat(format);
+        this.flush(3);
+        if (this._initialized) this.reset();
+    }
 
     get stackedCount() { return this._stackedCount; }
 
@@ -340,17 +383,25 @@ export class StreamingStacker extends EventTarget {
     }
 
     async _processFrame(pixels, meta) {
-        const { width: srcW, height: srcH, gain, exposure_ms, bayer, bit_depth: bitDepth = 16 } = meta;
+        const { width: srcW, height: srcH, gain, exposure_ms, bayer, bit_depth: bitDepth = 16,
+                format = 'raw' } = meta;
         const cropSize     = srcW;
         const bayerPattern = BAYER_INT[bayer] ?? 0;
         const frameIdx     = this._frameIndex++;
 
-        // 1. Analyze (debayer + score Laplacian)
-        const pixelCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
-        const rawPixels = bitDepth === 8 ? new Uint8Array(pixelCopy) : new Uint16Array(pixelCopy);
-        const analyzed  = await this._analyze(
-            rawPixels, srcW, srcH, cropSize, bayerPattern, frameIdx, bitDepth
-        );
+        // 1. Analyze — Bayer (debayer + score Laplacian) ou image déjà
+        // débayerisée par l'ISP (JPEG/PNG, décodage navigateur + score).
+        let analyzed;
+        if (format === 'jpeg' || format === 'png') {
+            const imgCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+            analyzed = await this._analyzeImage(new Uint8Array(imgCopy), format, cropSize, frameIdx);
+        } else {
+            const pixelCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+            const rawPixels = bitDepth === 8 ? new Uint8Array(pixelCopy) : new Uint16Array(pixelCopy);
+            analyzed = await this._analyze(
+                rawPixels, srcW, srcH, cropSize, bayerPattern, frameIdx, bitDepth
+            );
+        }
         if (!analyzed) return;
 
         const { sharpness, float32Buffer, packedGrayBuffer,
@@ -486,6 +537,37 @@ export class StreamingStacker extends EventTarget {
         });
     }
 
+    // Envoie des bytes JPEG/PNG (déjà débayerisés par l'ISP) au worker pour
+    // décodage + score — pendant analogue de _analyze() pour le chemin non-Bayer.
+    _analyzeImage(bytes, format, cropSize, requestId) {
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+                () => reject(new Error('Image analyze timeout')), 60_000
+            );
+            const handler = ({ data }) => {
+                if (!data || data.requestId !== requestId) return;
+                if (data.type === 'image-analyze-result') {
+                    clearTimeout(timeout);
+                    this._analyzeWorker.removeEventListener('message', handler);
+                    resolve(data.result ?? null);
+                } else if (data.type === 'image-analyze-error') {
+                    clearTimeout(timeout);
+                    this._analyzeWorker.removeEventListener('message', handler);
+                    reject(new Error(data.error));
+                }
+            };
+            this._analyzeWorker.addEventListener('message', handler);
+
+            this._analyzeWorker.postMessage({
+                type:     'image-analyze',
+                bytes,
+                mimeType: format === 'png' ? 'image/png' : 'image/jpeg',
+                cropSize,
+                requestId,
+            }, [bytes.buffer]);
+        });
+    }
+
     // Initialise le stacking à partir de la première frame acceptée
     async _initStacking(float32Buffer, w, h) {
         const refGray = float32ToGray(float32Buffer, w, h);
@@ -611,8 +693,11 @@ export class StreamingStacker extends EventTarget {
         });
         if (!snap?.float32Buffer) return;
 
+        const awbGains = this._awbEnabled
+            ? computeAWBGains(snap.float32Buffer, snap.width, snap.height)
+            : null;
         stretchToCanvas(snap.float32Buffer, snap.width, snap.height,
-                        this._canvas, this._stretchLow, this._stretchHigh, this._stretchBeta);
+                        this._canvas, this._stretchLow, this._stretchHigh, this._stretchBeta, awbGains);
         this.dispatchEvent(new CustomEvent('preview'));
     }
 }
