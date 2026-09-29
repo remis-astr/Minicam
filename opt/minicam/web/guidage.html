@@ -262,9 +262,14 @@ async function pollTime() {
   try {
     const t = await api('/mount/site');
     $('m-utc').textContent = t.utc ? t.utc.slice(11, 19) : '—';
-    const bad = Math.abs(t.sidereal_error_s || 0) > 5;
-    show($('time-alert'), bad);
-    if (bad) $('time-alert').textContent = `Heure/site de la monture incohérents (temps sidéral décalé de ${t.sidereal_error_s} s) : refaire la mise à l'heure via SWS.`;
+    const badSid = Math.abs(t.sidereal_error_s || 0) > 5;
+    const badClock = t.mount_clock_ok === false;
+    show($('time-alert'), badSid || badClock);
+    if (badClock) {
+      const e = t.mount_clock_error_s, a = Math.abs(e);
+      const txt = a >= 86400 ? `${(a / 86400).toFixed(1)} j` : a >= 60 ? `${Math.round(a / 60)} min` : `${a.toFixed(1)} s`;
+      $('time-alert').textContent = `Horloge de la monture ${e < 0 ? 'en retard' : 'en avance'} de ${txt} sur celle du téléphone : refaire la mise à l'heure via SWS.`;
+    } else if (badSid) $('time-alert').textContent = `Heure/site de la monture incohérents (temps sidéral décalé de ${t.sidereal_error_s} s) : refaire la mise à l'heure via SWS.`;
   } catch { /* monture absente : déjà signalé */ }
 }
 async function act(el, path, body, okText) {
