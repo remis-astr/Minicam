@@ -96,7 +96,8 @@ function sharpnessAndGray(rgba, w, h) {
 // Retourne { sharpness, float32Buffer, packedGrayBuffer, width, height },
 // même forme que le chemin Bayer ci-dessus — décodage via createImageBitmap
 // (dispo dans les module workers) + OffscreenCanvas, pas de debayer() ici.
-async function analyzeImageBytes(bytes, mimeType, cropSize) {
+async function analyzeImageBytes(bytes, mimeType, cropSize, width, height) {
+    if (mimeType === 'image/x-rgba') return analyzeRgba8(bytes, width, height);
     const blob   = new Blob([bytes], { type: mimeType });
     const bitmap = await createImageBitmap(blob);
     const srcW = bitmap.width, srcH = bitmap.height;
@@ -120,6 +121,17 @@ async function analyzeImageBytes(bytes, mimeType, cropSize) {
     return { sharpness, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: cropW, height: cropH };
 }
 
+// Pixels RGBA 8 bits déjà en mémoire (ex. SER RGB rejoué) : pas d'aller-retour
+// PNG, même sortie que analyzeImageBytes (plein champ, pas de recadrage).
+function analyzeRgba8(rgba8, w, h) {
+    const n    = w * h;
+    const rgba = new Float32Array(n * 4);
+    const inv  = 1 / 255;
+    for (let i = 0; i < n * 4; i++) rgba[i] = rgba8[i] * inv;
+    const { sharpness, gray8 } = sharpnessAndGray(rgba, w, h);
+    return { sharpness, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: w, height: h };
+}
+
 // ── Message handler ─────────────────────────────────────────────────────────
 self.onmessage = ({ data }) => {
     if (!data) return;
@@ -135,8 +147,8 @@ self.onmessage = ({ data }) => {
             self.postMessage({ type: 'image-analyze-error', error: 'Not initialized', requestId: data.requestId });
             return;
         }
-        const { bytes, mimeType, cropSize, requestId } = data;
-        analyzeImageBytes(bytes, mimeType, cropSize)
+        const { bytes, mimeType, cropSize, width, height, requestId } = data;
+        analyzeImageBytes(bytes, mimeType, cropSize, width, height)
             .then((result) => {
                 self.postMessage(
                     { type: 'image-analyze-result', requestId, result },

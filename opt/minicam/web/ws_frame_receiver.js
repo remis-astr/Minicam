@@ -39,6 +39,14 @@ export class WsFrameReceiver {
         this._initialRoi      = null;
         this._initialBitDepth = null;
         this._initialFormat   = null;
+        // Contrôle de flux par crédits (0 = désactivé, cadence fixe du serveur).
+        // Avec N > 0 : le serveur n'envoie qu'une image par crédit, et les
+        // images arrivées pendant un traitement attendent dans une file FIFO
+        // (N au plus) au lieu d'être jetées ; un crédit est rendu à chaque
+        // image sortie de la file. Absorbe l'écart entre images rejetées
+        // (rapides) et acceptées (lentes) sans jamais perdre d'image.
+        this._flowCredits     = 0;
+        this._queue           = [];
     }
 
     // --- API publique --------------------------------------------------
@@ -54,7 +62,20 @@ export class WsFrameReceiver {
      * puis setProcessing(false) dans le handler de réponse worker.
      * Quand processing=true, les frames entrantes sont droppées silencieusement.
      */
-    setProcessing(busy) { this._processing = busy; }
+    setProcessing(busy) {
+        const wasBusy = this._processing;
+        this._processing = busy;
+        if (this._flowCredits > 0 && wasBusy && !busy) {
+            this._grantCredit();
+            this._pump();
+        }
+    }
+
+    /** Active le contrôle de flux avec un buffer de n images (avant start()). */
+    setFlowControl(n) { this._flowCredits = Math.max(0, n | 0); }
+
+    /** Images en attente dans le buffer. */
+    get queued() { return this._queue.length; }
 
     /**
      * Ignorer les N prochaines frames reçues.
@@ -143,6 +164,11 @@ export class WsFrameReceiver {
                     ws.send(JSON.stringify({ cmd: 'set_bitdepth', bit_depth: this._initialBitDepth }));
                 if (this._initialFormat != null)
                     ws.send(JSON.stringify({ cmd: 'set_format', format: this._initialFormat }));
+                // Crédits envoyés en dernier : les réglages ci-dessus s'appliquent
+                // dès la première image capturée.
+                this._queue = [];
+                if (this._flowCredits > 0)
+                    ws.send(JSON.stringify({ cmd: 'credit', n: this._flowCredits }));
                 resolved = true;
                 resolve();
             };
@@ -168,13 +194,38 @@ export class WsFrameReceiver {
         }, delay);
     }
 
+    _grantCredit() {
+        if (this._ws?.readyState === WebSocket.OPEN)
+            this._ws.send(JSON.stringify({ cmd: 'credit', n: 1 }));
+    }
+
+    // Mode crédits : délivre les images en attente tant que le consommateur
+    // est libre ; une image qui ne déclenche pas de traitement (flush, message
+    // invalide, stacker en pause) rend son crédit tout de suite.
+    _pump() {
+        while (!this._processing && this._queue.length) {
+            this._deliver(this._queue.shift());
+            if (!this._processing) this._grantCredit();
+        }
+    }
+
     _onMessage(event) {
+        if (this._flowCredits > 0) {
+            if (typeof event.data === 'string') return;   // messages texte (erreurs) : pas de crédit
+            this._queue.push(event);
+            this._pump();
+            return;
+        }
         // Backpressure : le stacker traite encore la frame précédente → dropper
         if (this._processing) {
             this._droppedFrames++;
             return;
         }
 
+        this._deliver(event);
+    }
+
+    _deliver(event) {
         // Flush : ignorer les N premières frames après un changement de paramètres
         if (this._flushRemaining > 0) {
             this._flushRemaining--;

@@ -137,13 +137,63 @@
     </div>
     <div class="range-row">
       <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
-      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="5">
-      <span class="range-val" id="stretch-beta-val">5</span>
+      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+      <span class="range-val" id="stretch-beta-val">0</span>
     </div>
     <div class="range-row">
       <label for="stretch-hi">Saturation <span class="input-hint">(percentile blanc)</span></label>
       <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+
+    <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter) ; aperçu et PNG, le FITS reste brut</div>
+
+    <div class="range-row">
+      <label for="wav-1">Ondelettes 1 <span class="input-hint">(détail fin)</span></label>
+      <input type="range" id="wav-1" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-1-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-2">Ondelettes 2 <span class="input-hint">(moyen)</span></label>
+      <input type="range" id="wav-2" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-2-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-3">Ondelettes 3 <span class="input-hint">(large)</span></label>
+      <input type="range" id="wav-3" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-3-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-4">Ondelettes 4 <span class="input-hint">(très large)</span></label>
+      <input type="range" id="wav-4" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-4-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-denoise">Débruitage <span class="input-hint">(couche 1, × bruit)</span></label>
+      <input type="range" id="wav-denoise" min="0" max="3" step="0.1" value="0">
+      <span class="range-val" id="wav-denoise-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="contrast">Contraste <span class="input-hint">(courbe en S)</span></label>
+      <input type="range" id="contrast" min="0" max="100" step="1" value="0">
+      <span class="range-val" id="contrast-val">0 %</span>
+    </div>
+
+    <div class="range-row">
+      <label for="clahe">CLAHE <span class="input-hint">(contraste local)</span></label>
+      <input type="range" id="clahe" min="0" max="100" step="1" value="0">
+      <span class="range-val" id="clahe-val">0 %</span>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="ser-file" title="Rejoue un fichier SER local à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Test SER</label>
+      <input type="file" id="ser-file" accept=".ser">
+      <button id="ser-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
     </div>
 
     <div class="button-row">
@@ -163,6 +213,7 @@
 
 <script type="module">
 import { StreamingStacker } from './stacker.js';
+import { SerFileSource } from './ser_file_source.js';
 import { detectGpu, ControlWs, savePng, saveFits, formatDate } from './ui_common.js';
 
 const WS_RAW = `ws://${location.host}/ws/raw`;
@@ -187,12 +238,47 @@ const elStretchBetaVal = document.getElementById('stretch-beta-val');
 const elStretchHi    = document.getElementById('stretch-hi');
 const elStretchHiVal = document.getElementById('stretch-hi-val');
 const btnStart     = document.getElementById('btn-start');
+const elWav        = [1, 2, 3, 4].map((j) => document.getElementById(`wav-${j}`));
+const elWavDenoise = document.getElementById('wav-denoise');
+const elContrast   = document.getElementById('contrast');
+const elClahe      = document.getElementById('clahe');
+const postValues = () => ({
+    wavelets:       elWav.map((e) => parseFloat(e.value)),
+    waveletDenoise: parseFloat(elWavDenoise.value),
+    contrast:       parseInt(elContrast.value) / 100,
+    clahe:          parseInt(elClahe.value) / 100,
+});
+for (const el of [...elWav, elWavDenoise, elContrast, elClahe]) {
+    el.addEventListener('input', () => {
+        document.getElementById(`${el.id}-val`).textContent =
+            el.value + (el === elContrast || el === elClahe ? ' %' : '');
+        const s = view();
+        if (!s) return;
+        const v = postValues();
+        s.setWavelets(v.wavelets, v.waveletDenoise);
+        s.setContrast(v.contrast);
+        s.setClahe(v.clahe);
+    });
+}
 const btnStop      = document.getElementById('btn-stop');
 const btnReset     = document.getElementById('btn-reset');
 const btnSavePng   = document.getElementById('btn-save-png');
 const btnSaveFits  = document.getElementById('btn-save-fits');
+const elSerFile    = document.getElementById('ser-file');
+const btnSerClear  = document.getElementById('ser-clear');
+
+elSerFile.addEventListener('change', () => {
+    btnSerClear.classList.toggle('hidden', !elSerFile.files.length);
+});
+btnSerClear.addEventListener('click', () => {
+    elSerFile.value = '';
+    btnSerClear.classList.add('hidden');
+});
 
 let stacker   = null;
+// Dernier stack arrêté : reste affiché et réglable (ondelettes, étirement, export).
+let lastStacker = null;
+const view = () => stacker ?? lastStacker;
 let totalSeen = 0;
 let accepted  = 0;
 
@@ -256,7 +342,7 @@ elAlignRadius.addEventListener('input', () => {
 });
 
 elAwb.addEventListener('change', () => {
-    if (stacker) stacker.setAWB(elAwb.checked);
+    view()?.setAWB(elAwb.checked);
 });
 
 function stretchValues() {
@@ -269,17 +355,17 @@ function stretchValues() {
 elStretchLo.addEventListener('input', () => {
     elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
     const { lo, hi, beta } = stretchValues();
-    stacker?.setStretch(lo, hi, beta);
+    view()?.setStretch(lo, hi, beta);
 });
 elStretchBeta.addEventListener('input', () => {
     const v = parseFloat(elStretchBeta.value);
     elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
-    stacker?.setStretchBeta(v);
+    view()?.setStretchBeta(v);
 });
 elStretchHi.addEventListener('input', () => {
     elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
     const { lo, hi, beta } = stretchValues();
-    stacker?.setStretch(lo, hi, beta);
+    view()?.setStretch(lo, hi, beta);
 });
 
 const elBitDepth = document.getElementById('bitdepth-select');
@@ -320,6 +406,9 @@ function updateStats() {
 
 // Start stacking
 btnStart.addEventListener('click', async () => {
+    // Un stack déjà en cours (double clic…) serait orphelin : flux /ws/raw et
+    // workers continueraient sans pouvoir être arrêtés.
+    if (stacker) { stacker.stop(); stacker = null; }
     btnStart.classList.add('hidden');
     btnStop.classList.remove('hidden');
     btnReset.disabled    = true;
@@ -336,6 +425,7 @@ btnStart.addEventListener('click', async () => {
     elBitDepth.disabled    = true;
     elRoi.disabled         = true;
     elFormat.disabled      = true;
+    lastStacker = null;
     stacker = new StreamingStacker({
         mode:    'lucky',
         canvas,
@@ -350,6 +440,10 @@ btnStart.addEventListener('click', async () => {
             stretchLow:       parseFloat(elStretchLo.value) / 100,
             stretchHigh:      parseFloat(elStretchHi.value) / 100,
             stretchBeta:      parseFloat(elStretchBeta.value),
+            ...postValues(),
+            // Pas de cadence fixe : le Pi envoie au maximum, régulé par un
+            // buffer de 8 images (aucune image perdue en Lucky Stack).
+            flowCredits:      8,
         },
     });
 
@@ -369,10 +463,26 @@ btnStart.addEventListener('click', async () => {
         elStats.textContent = 'Erreur : ' + ev.detail.message;
     });
 
+    const serFile = elSerFile.files[0];
+    const source = serFile
+        ? new SerFileSource(serFile, {
+            onProgress: (i, n) => { elStatus.textContent = `SER ${i} / ${n}`; },
+            onEnd: () => {
+                elStatus.className   = 'badge disconnected';
+                elStatus.textContent = 'SER terminé';
+                stacker?.finish();
+            },
+        })
+        : WS_RAW;
+    elSerFile.disabled = true;
     try {
-        await stacker.start(WS_RAW);
+        await stacker.start(source);
         elStatus.className   = 'badge connected';
-        elStatus.textContent = 'Flux actif';
+        elStatus.textContent = serFile ? 'Lecture SER' : 'Flux actif';
+        if (serFile) {
+            const h = source.header;
+            console.log(`[SER] ${serFile.name} : ${h.width}×${h.height}, ${h.depth} bits, ColorID ${h.colorId}, ${h.frames} images`);
+        }
     } catch (e) {
         elStats.textContent  = 'Erreur connexion : ' + e.message;
         elStatus.className   = 'badge disconnected';
@@ -381,9 +491,17 @@ btnStart.addEventListener('click', async () => {
     }
 });
 
-btnStop.addEventListener('click', () => {
-    stacker?.stop();
+btnStop.addEventListener('click', async () => {
+    // Garder le stack : plus de nouvelles images, relecture complète du stack
+    // (finish) tant que le worker existe, puis arrêt du flux et des workers.
+    const s = stacker;
     stacker = null;
+    if (s) {
+        s.pause();
+        try { await s.finish(); } catch (e) { console.warn('[Stack] finish:', e); }
+        s.stop();
+    }
+    lastStacker = s;
     elAlignMode.disabled   = false;
     elAlignRadius.disabled = false;
     elBitDepth.disabled    = false;
@@ -396,6 +514,7 @@ btnStop.addEventListener('click', () => {
 });
 
 btnReset.addEventListener('click', () => {
+    lastStacker = null;
     totalSeen = 0; accepted = 0;
     updateStats();
     btnSavePng.disabled  = true;
@@ -410,10 +529,10 @@ btnSavePng.addEventListener('click', () => {
 });
 
 btnSaveFits.addEventListener('click', async () => {
-    if (!stacker) return;
+    if (!view()) return;
     btnSaveFits.disabled = true;
     try {
-        const result = await stacker.getStackResult();
+        const result = await view().getStackResult();
         saveFits(result, `lucky_${formatDate()}.fits`);
     } catch (e) {
         elStats.textContent = 'Erreur FITS : ' + e.message;
@@ -423,6 +542,7 @@ btnSaveFits.addEventListener('click', async () => {
 });
 
 function _resetUI() {
+    elSerFile.disabled = false;
     btnStart.classList.remove('hidden');
     btnStop.classList.add('hidden');
     btnReset.disabled = false;

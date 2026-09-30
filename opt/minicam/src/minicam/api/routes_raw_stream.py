@@ -16,6 +16,8 @@ router = APIRouter()
 
 _DEFAULT_FPS = 5
 _MAX_FPS = 120
+
+_capture_lock = asyncio.Lock()
 _JPEG_QUALITY = 90
 
 
@@ -117,6 +119,13 @@ async def ws_raw(websocket: WebSocket) -> None:
     log.info("[ws/raw] client CONNECTED — raw_clients now=%d", app.state.raw_clients)
 
     fps = float(_DEFAULT_FPS)
+    # Contrôle de flux par crédits (optionnel) : None = cadence fixe `fps`
+    # (comportement historique). Dès que le client envoie {"cmd": "credit",
+    # "n": k}, une image est capturée/envoyée par crédit, sans plafond de
+    # cadence : on tourne au rythme du maillon le plus lent (caméra, Pi,
+    # liaison, navigateur) sans envoyer d'images que le client jetterait.
+    credits: int | None = None
+    credit_event = asyncio.Event()
     running = True
     roi: tuple[int, int] | None = None
     bit_depth: int = 16
@@ -125,7 +134,7 @@ async def ws_raw(websocket: WebSocket) -> None:
     _frame_count = 0
 
     async def recv_loop() -> None:
-        nonlocal fps, running, roi, bit_depth, img_format
+        nonlocal fps, running, roi, bit_depth, img_format, credits
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -133,7 +142,13 @@ async def ws_raw(websocket: WebSocket) -> None:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if msg.get("cmd") == "set_rate":
+                if msg.get("cmd") == "credit":
+                    try:
+                        credits = (credits or 0) + max(0, int(msg.get("n", 1)))
+                        credit_event.set()
+                    except (ValueError, TypeError):
+                        pass
+                elif msg.get("cmd") == "set_rate":
                     fps = max(0.1, min(_MAX_FPS, float(msg.get("fps", _DEFAULT_FPS))))
                 elif msg.get("cmd") == "set_roi":
                     try:
@@ -172,6 +187,17 @@ async def ws_raw(websocket: WebSocket) -> None:
                 await websocket.send_text(json.dumps({"cmd": "error", "detail": "INDI mode active"}))
                 break
 
+            if credits is not None:
+                while credits <= 0 and running and not recv_task.done():
+                    credit_event.clear()
+                    try:
+                        await asyncio.wait_for(credit_event.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                if not running or recv_task.done():
+                    break
+                credits -= 1
+
             t0 = loop.time()
             try:
                 camera = app.state.camera
@@ -190,14 +216,18 @@ async def ws_raw(websocket: WebSocket) -> None:
                 # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
                 # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
                 # matériellement — voir _capture_and_encode_isp).
-                if cur_format == "raw":
-                    payload, h, w, timing = await loop.run_in_executor(
-                        None, _capture_and_encode, camera, cur_roi, cur_bit_depth
-                    )
-                else:
-                    payload, h, w, timing = await loop.run_in_executor(
-                        None, _capture_and_encode_isp, camera, cur_roi, cur_format
-                    )
+                # Une seule capture à la fois, tous clients /ws/raw confondus :
+                # deux flux capturant en parallèle ont figé la caméra
+                # (« Camera frontend has timed out », threads bloqués).
+                async with _capture_lock:
+                    if cur_format == "raw":
+                        payload, h, w, timing = await loop.run_in_executor(
+                            None, _capture_and_encode, camera, cur_roi, cur_bit_depth
+                        )
+                    else:
+                        payload, h, w, timing = await loop.run_in_executor(
+                            None, _capture_and_encode_isp, camera, cur_roi, cur_format
+                        )
 
                 meta_json = json.dumps({
                     # Legacy fields — kept for RPiCamera2 / minicam.py compat
@@ -231,7 +261,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                     total_ms = (t_send_end - t0) * 1000
                     log.info(
                         "[WS/raw] frame #%d: cap=%.0fms unpack=%.0fms tobytes=%.0fms "
-                        "send=%.0fms total=%.0fms size=%.1fkB fps_target=%.1f",
+                        "send=%.0fms total=%.0fms size=%.1fkB %s",
                         _frame_count,
                         timing["capture_ms"],
                         timing["unpack_ms"],
@@ -239,7 +269,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                         send_ms,
                         total_ms,
                         timing["payload_bytes"] / 1024,
-                        fps,
+                        f"fps_target={fps:.1f}" if credits is None else "flux=crédits",
                     )
 
             except WebSocketDisconnect:
@@ -259,10 +289,11 @@ async def ws_raw(websocket: WebSocket) -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            elapsed = loop.time() - t0
-            wait = (1.0 / fps) - elapsed
-            if wait > 0:
-                await asyncio.sleep(wait)
+            if credits is None:
+                elapsed = loop.time() - t0
+                wait = (1.0 / fps) - elapsed
+                if wait > 0:
+                    await asyncio.sleep(wait)
     finally:
         recv_task.cancel()
         before = app.state.raw_clients

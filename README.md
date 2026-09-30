@@ -48,6 +48,31 @@ Le dépôt suit l'arborescence du Pi :
   `PYTHONPATH`
 - Configuration : `/etc/minicam/config.toml` (section `[camera]`, clé `sensor`)
 
+## Lucky Stack — notes
+
+- **Flux caméra** : buffer de 8 images avec contrôle de flux par crédits
+  (`{"cmd": "credit"}` sur `/ws/raw`) — le Pi envoie au maximum de ses
+  capacités, sans image perdue. Mesuré en USB (IMX477) : RAW 8 bits ROI
+  640×480 ≈ 8,7 img/s ; RAW 16 bits 852×480 ≈ 2 img/s. La limite est
+  l'envoi côté Pi (~3,6 Mo/s). Les autres pages gardent la cadence fixe.
+  Une seule capture RAW à la fois (verrou serveur) : deux flux simultanés
+  ont figé la caméra (« Camera frontend has timed out »).
+- **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
+  n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
+- **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel
+  profond), contraste (courbe en S) ; ondelettes à trous (4 couches +
+  débruitage) et CLAHE appliqués **à la fin** du stack (SER terminé ou
+  ■ Arrêter), qui garde l'image et laisse tous les réglages actifs. PNG =
+  image traitée, FITS = stack brut.
+- **WebGPU** : Chrome ne l'expose que sur une page sûre (HTTPS ou
+  `localhost`). La page étant en HTTP : `ssh -N -L 8000:localhost:8000
+  admin@<ip>` puis `http://localhost:8000/…`, ou
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`. Sous Linux,
+  activer aussi `#enable-unsafe-webgpu` et `#enable-vulkan`, sinon Chrome
+  fournit SwiftShader (GPU émulé, bien plus lent que les workers CPU : le
+  stacker le refuse). La console indique `[Stacker] GPU=… (carte)` et, à la
+  fin, la durée de chaque étape.
+
 ## Installation sur une nouvelle carte SD
 
 Procédure complète, validée sur `multicam2` (Pi Zero 2 W + IMX477). Les

@@ -90,10 +90,162 @@ function computeAWBGains(float32Buf, w, h) {
 }
 
 // ---------------------------------------------------------------------------
+// Post-traitement de l'aperçu (ondelettes, contraste, CLAHE) — appliqué au
+// rendu canvas (donc à l'export PNG), jamais aux données du stack (FITS brut).
+// ---------------------------------------------------------------------------
+
+// Flou B3-spline « à trous » séparable (noyau 1-4-6-4-1, pas 2^j), bords clampés.
+function _atrousBlur(src, w, h, step, tmp, dst) {
+    const k0 = 6 / 16, k1 = 4 / 16, k2 = 1 / 16;
+    for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+            const xm1 = Math.max(0, x - step),     xp1 = Math.min(w - 1, x + step);
+            const xm2 = Math.max(0, x - 2 * step), xp2 = Math.min(w - 1, x + 2 * step);
+            tmp[row + x] = k0 * src[row + x] + k1 * (src[row + xm1] + src[row + xp1])
+                         + k2 * (src[row + xm2] + src[row + xp2]);
+        }
+    }
+    for (let y = 0; y < h; y++) {
+        const ym1 = Math.max(0, y - step) * w,     yp1 = Math.min(h - 1, y + step) * w;
+        const ym2 = Math.max(0, y - 2 * step) * w, yp2 = Math.min(h - 1, y + 2 * step) * w;
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+            dst[row + x] = k0 * tmp[row + x] + k1 * (tmp[ym1 + x] + tmp[yp1 + x])
+                         + k2 * (tmp[ym2 + x] + tmp[yp2 + x]);
+        }
+    }
+}
+
+/**
+ * Accentuation par ondelettes à trous sur la luminance (comme les ondelettes
+ * de Registax) : L' = L + Σ amounts[j]·détail_j. Le même ΔL est ajouté aux
+ * trois canaux (couleur préservée, pas de bruit chromatique amplifié).
+ * denoise : seuil doux de la couche 1 en multiples du bruit estimé (MAD).
+ * Seul le cadre autour de l'objet est calculé. Retourne un nouveau buffer RGBA
+ * float32, ou le buffer d'origine si rien à faire.
+ */
+function applyWavelets(rgba, w, h, amounts, denoise = 0) {
+    if (!amounts.some((a) => a !== 0) && !(denoise > 0)) return rgba;
+    const n = w * h;
+    const lum = new Float32Array(n);
+    let maxL = 0;
+    for (let i = 0; i < n; i++) {
+        const l = 0.299 * rgba[i*4] + 0.587 * rgba[i*4+1] + 0.114 * rgba[i*4+2];
+        lum[i] = l;
+        if (l > maxL) maxL = l;
+    }
+    // Cadre englobant l'objet (> 3 % du max) + marge couvrant le support des
+    // 4 niveaux à trous : sur une planète, le ciel noir n'est pas calculé.
+    const thr = 0.03 * maxL;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+            if (lum[row + x] > thr) {
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+            }
+        }
+    }
+    if (x1 < 0) return rgba;
+    const m = 4 << amounts.length;
+    x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m);
+    x1 = Math.min(w - 1, x1 + m); y1 = Math.min(h - 1, y1 + m);
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1, bn = bw * bh;
+
+    let cur = new Float32Array(bn);
+    for (let y = 0; y < bh; y++) cur.set(lum.subarray((y0 + y) * w + x0, (y0 + y) * w + x0 + bw), y * bw);
+    const delta = new Float32Array(bn);
+    const tmp = new Float32Array(bn);
+    let next = new Float32Array(bn);
+    for (let j = 0; j < amounts.length; j++) {
+        _atrousBlur(cur, bw, bh, 1 << j, tmp, next);
+        const a = amounts[j];
+        let t = 0;
+        if (j === 0 && denoise > 0) {
+            // σ du bruit ≈ MAD(détail fin)/0.6745, échantillon 1/16
+            const smp = [];
+            for (let i = 0; i < bn; i += 16) smp.push(Math.abs(cur[i] - next[i]));
+            smp.sort((p, q) => p - q);
+            t = denoise * smp[smp.length >> 1] / 0.6745;
+        }
+        if (a !== 0 || t > 0) {
+            for (let i = 0; i < bn; i++) {
+                const d0 = cur[i] - next[i];
+                const d  = t > 0 ? (d0 > t ? d0 - t : d0 < -t ? d0 + t : 0) : d0;
+                delta[i] += (1 + a) * d - d0;   // gain (1 + a) sur la couche (débruitée)
+            }
+        }
+        [cur, next] = [next, cur];
+    }
+    const out = new Float32Array(rgba);
+    for (let y = 0; y < bh; y++) {
+        for (let x = 0; x < bw; x++) {
+            const dl = delta[y * bw + x], i = ((y0 + y) * w + x0 + x) * 4;
+            out[i]   = Math.max(0, rgba[i]   + dl);
+            out[i+1] = Math.max(0, rgba[i+1] + dl);
+            out[i+2] = Math.max(0, rgba[i+2] + dl);
+        }
+    }
+    return out;
+}
+
+/**
+ * CLAHE sur la luminance d'une image RGBA 8 bits (en place) : histogrammes
+ * écrêtés par tuile (grille tiles×tiles), interpolation bilinéaire entre
+ * tuiles, puis mélange avec l'original selon strength (0–1). Les canaux sont
+ * mis à l'échelle par Y'/Y (teinte conservée). Le fond quasi noir (Y < 4)
+ * n'est pas touché, pour ne pas faire ressortir le bruit du ciel.
+ */
+function applyClahe(d, w, h, strength, clipLimit = 3, tiles = 8) {
+    if (strength <= 0) return;
+    const n = w * h;
+    const Y = new Uint8Array(n);
+    for (let i = 0; i < n; i++)
+        Y[i] = Math.min(255, Math.round(0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2]));
+    const tw = Math.ceil(w / tiles), th = Math.ceil(h / tiles);
+    const maps = new Array(tiles * tiles);
+    const hist = new Uint32Array(256);
+    for (let ty = 0; ty < tiles; ty++) for (let tx = 0; tx < tiles; tx++) {
+        hist.fill(0);
+        const x0 = tx * tw, y0 = ty * th, x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
+        const cnt = Math.max(1, (x1 - x0) * (y1 - y0));
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) hist[Y[y * w + x]]++;
+        const limit = Math.max(1, Math.floor(clipLimit * cnt / 256));
+        let excess = 0;
+        for (let v = 0; v < 256; v++) if (hist[v] > limit) { excess += hist[v] - limit; hist[v] = limit; }
+        const add = excess / 256;
+        const map = new Uint8Array(256);
+        let cdf = 0;
+        for (let v = 0; v < 256; v++) { cdf += hist[v] + add; map[v] = Math.min(255, Math.round(cdf * 255 / cnt)); }
+        maps[ty * tiles + tx] = map;
+    }
+    for (let y = 0; y < h; y++) {
+        const gy = Math.min(tiles - 1, Math.max(0, (y + 0.5) / th - 0.5));
+        const ty0 = Math.floor(gy), ty1 = Math.min(tiles - 1, ty0 + 1), fy = gy - ty0;
+        for (let x = 0; x < w; x++) {
+            const i = y * w + x, v = Y[i];
+            if (v < 4) continue;
+            const gx = Math.min(tiles - 1, Math.max(0, (x + 0.5) / tw - 0.5));
+            const tx0 = Math.floor(gx), tx1 = Math.min(tiles - 1, tx0 + 1), fx = gx - tx0;
+            const top = maps[ty0 * tiles + tx0][v] * (1 - fx) + maps[ty0 * tiles + tx1][v] * fx;
+            const bot = maps[ty1 * tiles + tx0][v] * (1 - fx) + maps[ty1 * tiles + tx1][v] * fx;
+            const eq  = top * (1 - fy) + bot * fy;
+            const r   = (v + strength * (eq - v)) / v;
+            d[i*4]   = Math.min(255, d[i*4]   * r);
+            d[i*4+1] = Math.min(255, d[i*4+1] * r);
+            d[i*4+2] = Math.min(255, d[i*4+2] * r);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Preview stretch : percentiles sur échantillon 1/16, LUT arcsinh, rendu canvas
 // ---------------------------------------------------------------------------
 
-function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null) {
+function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
+                         contrast = 0, clahe = 0) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     const [gR, gG, gB] = awbGains ?? [1, 1, 1];
@@ -118,9 +270,15 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     const LUT    = 4096;
     const lut    = new Uint8Array(LUT);
     const abeta  = beta > 0 ? Math.asinh(beta) : 1;
+    // Contraste : sigmoïde centrée sur 0.5, normalisée pour garder 0→0 et 1→1
+    // (contrast 0 → identité, 1 → pente ×~3 au milieu).
+    const kS   = contrast * 8;
+    const sig  = (x) => 1 / (1 + Math.exp(-kS * (x - 0.5)));
+    const s0   = sig(0), s1 = sig(1);
     for (let i = 0; i < LUT; i++) {
         const norm = i / (LUT - 1);                                    // [0, 1]
-        const s    = beta > 0 ? Math.asinh(beta * norm) / abeta : norm;
+        let s      = beta > 0 ? Math.asinh(beta * norm) / abeta : norm;
+        if (kS > 0) s = (sig(s) - s0) / (s1 - s0);
         lut[i]     = Math.min(255, Math.round(s * 255));
     }
 
@@ -139,6 +297,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
         }
         d[i*4 + 3] = 255;
     }
+    applyClahe(d, w, h, clahe);
     canvas.getContext('2d').putImageData(idata, 0, 0);
 }
 
@@ -176,7 +335,28 @@ export class StreamingStacker extends EventTarget {
         this._stretchHigh      = options.stretchHigh ?? 0.999;
         this._stretchBeta      = options.stretchBeta ?? 0;
         this._previewEveryN    = options.previewEveryN ?? 1;
+        // Buffer d'images avec contrôle de flux (voir WsFrameReceiver) ; 0 =
+        // cadence fixe du serveur (comportement historique).
+        this._flowCredits      = options.flowCredits ?? 0;
+        // Aperçu au plus toutes les previewIntervalMs pendant l'empilement : la
+        // relecture GPU + l'étirement bloquent le pipeline, un aperçu par image
+        // acceptée donnait un traitement par à-coups. finish() force le dernier.
+        this._previewIntervalMs = options.previewIntervalMs ?? 500;
+        this._lastPreviewAt    = 0;
+        // Durées par étape (ms), résumées par timingSummary()
+        this.timings = { analyze: [], align: [], stack: [], preview: [] };
         this._awbEnabled       = options.awb ?? false;
+        // Post-traitement de l'aperçu (voir applyWavelets / applyClahe)
+        this._wavelets         = options.wavelets ?? [0, 0, 0, 0];
+        this._waveletDenoise   = options.waveletDenoise ?? 0;
+        this._contrast         = options.contrast ?? 0;
+        this._clahe            = options.clahe ?? 0;
+        // Ondelettes + CLAHE : coûteux, appliqués seulement une fois le stack
+        // terminé (setPostProcessing(true)) — pendant l'empilement, l'aperçu
+        // n'a que l'étirement et le contraste (LUT, quasi gratuits).
+        this._postActive       = false;
+        this._lastSnap         = null;   // dernier snapshot du stack, re-rendu sans le GPU
+        this._renderPending    = false;
 
         // Workers (créés dans start())
         this._analyzeWorker = null;
@@ -195,7 +375,9 @@ export class StreamingStacker extends EventTarget {
         this._refGrayData     = null;
         this._alignmentPoints = null;
         this._patchSize       = 0;
-        this._searchRadius    = 0;
+        // (_searchRadius : déjà fixé plus haut depuis options.searchRadius — le
+        // remettre à 0 ici désactivait l'alignement tant que le curseur n'avait
+        // pas été touché.)
         this._cropW           = 0;
         this._cropH           = 0;
         this._refBrightness   = 0;
@@ -218,23 +400,29 @@ export class StreamingStacker extends EventTarget {
         this._stopped = false;
         this._paused  = false;
 
-        // Détection WebGPU : essayer adapter natif puis fallback SwiftShader
+        // Détection WebGPU : seulement un vrai GPU. L'adaptateur de secours
+        // (SwiftShader, émulé sur le CPU) est bien plus lent que les workers
+        // CPU : ~2,4 s d'alignement par image contre ~0,2 s (mesuré sur un
+        // SER 640×480) — il donnait un traitement par à-coups.
         let gpuOk = false;
+        let gpuName = 'aucun';
         if (typeof navigator !== 'undefined' && navigator.gpu) {
             try {
-                const a = await navigator.gpu.requestAdapter()
-                       ?? await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
-                gpuOk = !!a;
+                const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                const info = a?.info ?? {};
+                gpuName = a ? (info.description || `${info.vendor} ${info.architecture}`.trim() || 'inconnu') : 'aucun';
+                gpuOk = !!a && !info.isFallbackAdapter && info.architecture !== 'swiftshader';
             } catch { gpuOk = false; }
         }
-        this._gpuOk = gpuOk;
+        this._gpuOk   = gpuOk;
+        this._gpuName = gpuName;
 
         // Analyse toujours en CPU (plein champ 1920×1080 — GPU analyze worker est square-only).
         // Accumulation en GPU si disponible (worker Eise supporte dimensions rectangulaires).
         const base = new URL('.', import.meta.url).href;
         const analyzeFile = 'cpu_analyze_worker.js';
         const stackFile   = gpuOk ? 'webgpu_stacking_worker.js' : 'cpu_stacking_worker.js';
-        console.log(`[Stacker] GPU=${gpuOk} → ${analyzeFile} + ${stackFile}`);
+        console.log(`[Stacker] GPU=${gpuOk} (${gpuName}) → ${analyzeFile} + ${stackFile}`);
         this._analyzeWorker = new Worker(`${base}${analyzeFile}`, { type: 'module' });
         this._stackWorker   = new Worker(`${base}${stackFile}`,   { type: 'module' });
 
@@ -243,7 +431,10 @@ export class StreamingStacker extends EventTarget {
             this._workerInit(this._stackWorker,   'stack'),
         ]);
 
-        this._receiver = new WsFrameReceiver(wsUrl);
+        // wsUrl peut aussi être une source déjà construite ayant l'interface de
+        // WsFrameReceiver (ex. SerFileSource pour rejouer un fichier SER).
+        this._receiver = typeof wsUrl === 'string' ? new WsFrameReceiver(wsUrl) : wsUrl;
+        if (typeof wsUrl === 'string') this._receiver.setFlowControl(this._flowCredits);
         this._receiver.onFrame = (pixels, meta) => this._onFrame(pixels, meta);
         await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth, this._initialFormat);
     }
@@ -271,6 +462,8 @@ export class StreamingStacker extends EventTarget {
         this._cropH           = 0;
         this._sharpnessBuffer = [];
         this._lastSharpness   = 0;
+        this._lastSnap        = null;
+        this._postActive      = false;
         if (this._stackWorker) this._stackWorker.postMessage({ type: 'cleanup' });
         if (this._canvas) {
             const ctx = this._canvas.getContext('2d');
@@ -282,11 +475,48 @@ export class StreamingStacker extends EventTarget {
         this._stretchLow  = low;
         this._stretchHigh = high;
         if (beta !== undefined) this._stretchBeta = beta;
+        this._scheduleRender();
     }
 
-    setStretchBeta(beta) { this._stretchBeta = beta; }
+    setStretchBeta(beta) { this._stretchBeta = beta; this._scheduleRender(); }
 
-    setAWB(enabled) { this._awbEnabled = enabled; }
+    setAWB(enabled) { this._awbEnabled = enabled; this._scheduleRender(); }
+
+    /** amounts : gains par couche [fin, moyen, large, très large] (0 = neutre). */
+    setWavelets(amounts, denoise = 0) {
+        this._wavelets = amounts;
+        this._waveletDenoise = denoise;
+        this._scheduleRender();
+    }
+
+    setContrast(c) { this._contrast = c; this._scheduleRender(); }
+
+    setClahe(strength) { this._clahe = strength; this._scheduleRender(); }
+
+    /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
+    setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
+
+    /**
+     * Fin du stack (SER terminé, bouton Arrêter) : relit le stack complet
+     * (l'aperçu est limité dans le temps pendant l'empilement, les dernières
+     * images n'y sont peut-être pas) puis active ondelettes + CLAHE. À appeler
+     * avant stop(), tant que le worker d'empilement existe.
+     */
+    async finish() {
+        if (this._stackWorker && this._initialized) await this._updatePreview();
+        this.setPostProcessing(true);
+        console.log('[Stacker] ' + this.timingSummary());
+    }
+
+    timingSummary() {
+        const f = (a) => a.length
+            ? `${(a.reduce((x, y) => x + y, 0) / a.length).toFixed(0)}/${Math.max(...a).toFixed(0)} ms ×${a.length}`
+            : '—';
+        const t = this.timings;
+        return `moy/max — analyse ${f(t.analyze)}, alignement ${f(t.align)}, `
+             + `empilement ${f(t.stack)}, aperçu ${f(t.preview)} (GPU=${this._gpuOk}, ${this._gpuName})`;
+    }
+    get postProcessing() { return this._postActive; }
 
     setAlignMode(mode) {
         if (this._alignMode === mode) return;
@@ -340,6 +570,16 @@ export class StreamingStacker extends EventTarget {
      * Résout avec { float32Data, width, height, stackedCount, totalExpMs, gainMean }.
      */
     getStackResult() {
+        // Stack arrêté (workers terminés) : dernier snapshot gardé pour l'aperçu.
+        if (!this._stackWorker && this._lastSnap)
+            return Promise.resolve({
+                float32Data:  this._lastSnap.data,
+                width:        this._lastSnap.width,
+                height:       this._lastSnap.height,
+                stackedCount: this._stackedCount,
+                totalExpMs:   this._totalExpMs,
+                gainMean:     this._stackedCount > 0 ? this._gainSum / this._stackedCount : 0,
+            });
         if (!this._stackWorker || !this._initialized)
             return Promise.reject(new Error('Stacking not initialized'));
 
@@ -392,9 +632,12 @@ export class StreamingStacker extends EventTarget {
         // 1. Analyze — Bayer (debayer + score Laplacian) ou image déjà
         // débayerisée par l'ISP (JPEG/PNG, décodage navigateur + score).
         let analyzed;
-        if (format === 'jpeg' || format === 'png') {
+        let tStep = performance.now();
+        const lap = (key) => { const t = performance.now(); this.timings[key].push(t - tStep); tStep = t; };
+        if (format === 'jpeg' || format === 'png' || format === 'rgba') {
             const imgCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
-            analyzed = await this._analyzeImage(new Uint8Array(imgCopy), format, cropSize, frameIdx);
+            analyzed = await this._analyzeImage(new Uint8Array(imgCopy), format, cropSize, frameIdx,
+                                                srcW, srcH);
         } else {
             const pixelCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
             const rawPixels = bitDepth === 8 ? new Uint8Array(pixelCopy) : new Uint16Array(pixelCopy);
@@ -403,6 +646,7 @@ export class StreamingStacker extends EventTarget {
             );
         }
         if (!analyzed) return;
+        lap('analyze');
 
         const { sharpness, float32Buffer, packedGrayBuffer,
                 width: _fw, height: _fh } = analyzed;
@@ -457,7 +701,9 @@ export class StreamingStacker extends EventTarget {
             } else {
                 shifts = this._alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
             }
+            lap('align');
             await this._stackFrame(float32Buffer, shifts, sharpness);
+            lap('stack');
         }
 
         // 5. Compteurs
@@ -466,8 +712,14 @@ export class StreamingStacker extends EventTarget {
         this._gainSum    += gain ?? 0;
 
         // 6. Preview
-        if (this._canvas && this._stackedCount % this._previewEveryN === 0)
+        const now = performance.now();
+        if (this._canvas && this._stackedCount % this._previewEveryN === 0
+            && (this._stackedCount === 1 || now - this._lastPreviewAt >= this._previewIntervalMs)) {
+            this._lastPreviewAt = now;
+            tStep = performance.now();
             await this._updatePreview();
+            lap('preview');
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -539,7 +791,7 @@ export class StreamingStacker extends EventTarget {
 
     // Envoie des bytes JPEG/PNG (déjà débayerisés par l'ISP) au worker pour
     // décodage + score — pendant analogue de _analyze() pour le chemin non-Bayer.
-    _analyzeImage(bytes, format, cropSize, requestId) {
+    _analyzeImage(bytes, format, cropSize, requestId, width, height) {
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(
                 () => reject(new Error('Image analyze timeout')), 60_000
@@ -561,8 +813,10 @@ export class StreamingStacker extends EventTarget {
             this._analyzeWorker.postMessage({
                 type:     'image-analyze',
                 bytes,
-                mimeType: format === 'png' ? 'image/png' : 'image/jpeg',
+                mimeType: format === 'png' ? 'image/png' : format === 'rgba' ? 'image/x-rgba' : 'image/jpeg',
                 cropSize,
+                width,
+                height,
                 requestId,
             }, [bytes.buffer]);
         });
@@ -692,12 +946,29 @@ export class StreamingStacker extends EventTarget {
             this._stackWorker.postMessage({ type: 'get-stack-snapshot' });
         });
         if (!snap?.float32Buffer) return;
+        this._lastSnap = { data: new Float32Array(snap.float32Buffer), width: snap.width, height: snap.height };
+        this._render();
+    }
 
-        const awbGains = this._awbEnabled
-            ? computeAWBGains(snap.float32Buffer, snap.width, snap.height)
-            : null;
-        stretchToCanvas(snap.float32Buffer, snap.width, snap.height,
-                        this._canvas, this._stretchLow, this._stretchHigh, this._stretchBeta, awbGains);
+    // Re-rendu du dernier snapshot quand un réglage d'affichage change (même
+    // stack terminé) ; les mouvements de curseur rapprochés sont regroupés.
+    // setTimeout plutôt que requestAnimationFrame, suspendu onglet masqué.
+    _scheduleRender() {
+        if (!this._lastSnap || this._renderPending) return;
+        this._renderPending = true;
+        setTimeout(() => { this._renderPending = false; this._render(); }, 0);
+    }
+
+    _render() {
+        const snap = this._lastSnap;
+        if (!snap || !this._canvas) return;
+        const { width: w, height: h } = snap;
+        const awbGains = this._awbEnabled ? computeAWBGains(snap.data, w, h) : null;
+        const post = this._postActive;
+        const sharpened = post ? applyWavelets(snap.data, w, h, this._wavelets, this._waveletDenoise)
+                               : snap.data;
+        stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
+                        this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0);
         this.dispatchEvent(new CustomEvent('preview'));
     }
 }
