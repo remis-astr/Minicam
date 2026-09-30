@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -10,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from minicam.camera.controller import CameraController
+from minicam.config import STATE_PATH
 from minicam.api.routes_capture import router as capture_router
 from minicam.api.routes_control import router as control_router
 from minicam.api.routes_guide import router as guide_router
@@ -21,6 +24,29 @@ from minicam.api.routes_timelapse import router as timelapse_router
 from minicam.api.routes_wifi import router as wifi_router
 
 log = logging.getLogger(__name__)
+
+# Relances du processus après un échec d'allocation CMA (voir lifespan()).
+_CMA_RETRY_PATH = STATE_PATH.parent / "cma_retries"
+_CMA_MAX_RETRIES = 3
+_CMA_RETRY_WINDOW_S = 300
+
+
+def _is_cma_alloc_error(exc: BaseException) -> bool:
+    while exc is not None:
+        if isinstance(exc, OSError) and exc.errno in (errno.ENOMEM, errno.EBUSY):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _cma_retry_count() -> int:
+    """Relances déjà faites dans la fenêtre courante (0 si fichier vieux/absent)."""
+    try:
+        if time.time() - _CMA_RETRY_PATH.stat().st_mtime > _CMA_RETRY_WINDOW_S:
+            return 0
+        return int(_CMA_RETRY_PATH.read_text())
+    except (OSError, ValueError):
+        return 0
 
 camera: CameraController | None = None
 
@@ -53,13 +79,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # then has *less* free/contiguous CMA than the last, so 3 in-process
     # retries left ~130 MB permanently stuck instead of helping. A real fix
     # would need a full process restart (fresh CMA state) between attempts,
-    # not a loop within lifespan() — left as a single attempt for now.
+    # not a loop within lifespan(). So on a CMA alloc error (ENOMEM/EBUSY) the
+    # startup is aborted: uvicorn exits, systemd (Restart=on-failure) starts a
+    # fresh process. Capped at _CMA_MAX_RETRIES per window, then the server
+    # comes up without camera as before. Other errors (wrong sensor…) never
+    # trigger a restart.
     try:
         camera.open()
     except Exception as exc:
         log.exception("Camera failed to open")
         app.state.camera_error = str(exc)
+        retries = _cma_retry_count()
+        if _is_cma_alloc_error(exc) and retries < _CMA_MAX_RETRIES:
+            try:
+                _CMA_RETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _CMA_RETRY_PATH.write_text(str(retries + 1))
+            except OSError:
+                log.warning("Compteur %s non écrit, pas de relance", _CMA_RETRY_PATH)
+            else:
+                log.warning("Échec d'allocation CMA — relance du processus (%d/%d)",
+                            retries + 1, _CMA_MAX_RETRIES)
+                raise RuntimeError("CMA alloc failed, restart for a fresh CMA state") from exc
     else:
+        _CMA_RETRY_PATH.unlink(missing_ok=True)
         start_capture_loop(app)
     log.info("Camera ready" if app.state.camera_error is None else "Camera unavailable")
     yield

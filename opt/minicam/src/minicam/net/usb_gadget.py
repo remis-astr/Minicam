@@ -6,11 +6,15 @@ import os
 import subprocess
 from pathlib import Path
 
+from minicam.config import load_config
+
 log = logging.getLogger(__name__)
 
 GADGET_DIR = Path("/sys/kernel/config/usb_gadget/minicam")
-USB_IP = "192.168.7.3"
-HOST_IP = "192.168.7.1"
+# /etc/minicam/config.toml, [network] usb_ip ; l'hôte (PC/M8S) est en .1 du même /24.
+# Changer le sous-réseau permet de brancher deux Multicam sur la même machine.
+USB_IP: str = load_config()["network"]["usb_ip"]
+HOST_IP = USB_IP.rsplit(".", 1)[0] + ".1"
 
 
 def _write(path: Path, value: str) -> None:

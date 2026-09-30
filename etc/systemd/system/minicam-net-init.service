@@ -1,0 +1,11 @@
+[Unit]
+Description=minicam configuration réseau (hotspot, DHCP USB) depuis /etc/minicam/config.toml
+Before=NetworkManager.service dnsmasq.service minicam-net-usb.service minicam-m8s-forward.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/minicam-net-init
+
+[Install]
+WantedBy=multi-user.target NetworkManager.service
