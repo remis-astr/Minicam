@@ -9,7 +9,8 @@ import time
 import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from minicam.api.routes_capture import unpack_raw
+from minicam.api import zstd
+from minicam.api.routes_capture import raw_msb8, unpack_raw
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -21,46 +22,57 @@ _capture_lock = asyncio.Lock()
 _JPEG_QUALITY = 90
 
 
+def _center_box(w_full: int, h_full: int, roi: tuple[int, int] | None) -> tuple[int, int, int, int]:
+    """(x0, y0, w, h) of the centered ROI crop — even offsets keep the Bayer phase."""
+    if roi is None:
+        return 0, 0, w_full, h_full
+    roi_w = min(roi[0], w_full)
+    roi_h = min(roi[1], h_full)
+    x0 = ((w_full - roi_w) // 2) & ~1
+    y0 = ((h_full - roi_h) // 2) & ~1
+    return x0, y0, roi_w, roi_h
+
+
 def _center_crop(arr, roi: tuple[int, int] | None):
     """Centered crop on an array's first two axes (H, W[, C]) — shared by
     both the RAW and ISP encode paths below."""
-    if roi is None:
-        return arr
-    h_full, w_full = arr.shape[0], arr.shape[1]
-    roi_w, roi_h = roi
-    roi_w = min(roi_w, w_full)
-    roi_h = min(roi_h, h_full)
-    x0 = ((w_full - roi_w) // 2) & ~1
-    y0 = ((h_full - roi_h) // 2) & ~1
-    return arr[y0 : y0 + roi_h, x0 : x0 + roi_w]
+    x0, y0, w, h = _center_box(arr.shape[1], arr.shape[0], roi)
+    return arr[y0 : y0 + h, x0 : x0 + w]
 
 
 def _capture_and_encode(
     camera,
     roi: tuple[int, int] | None = None,
     bit_depth: int = 16,
+    compression: str = "none",
 ) -> tuple[bytes, int, int, dict]:
-    """Capture + unpack + crop ROI centré + encode — thread pool, jamais asyncio."""
+    """Capture + unpack + crop ROI centré + encode — thread pool, jamais asyncio.
+    compression="zstd" : charge utile compressée sans perte (trame zstd)."""
     t_cap = time.monotonic()
     raw_arr, meta = camera.capture_raw()
     t_unpack = time.monotonic()
     bits = camera.raw_bits
-    data_u16 = (unpack_raw(raw_arr, bits, camera.raw_size[0]) << (16 - bits)).astype("uint16")
-    data_u16 = _center_crop(data_u16, roi)
-
-    h, w = data_u16.shape
-    t_tobytes = time.monotonic()
     if bit_depth == 8:
-        # data_u16 is already left-shifted to fill the full 16-bit range
-        # regardless of source depth, so the top byte is always the MSBs.
-        payload = (data_u16 >> 8).astype("uint8").tobytes()
+        # MSB bytes gathered straight from the packed frame, ROI included —
+        # same bytes as the top byte of the left-shifted 16-bit unpack.
+        box = _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
+        data = raw_msb8(raw_arr, bits, *box)
     else:
-        payload = data_u16.tobytes()
+        data = (unpack_raw(raw_arr, bits, camera.raw_size[0]) << (16 - bits)).astype("uint16")
+        data = _center_crop(data, roi)
+
+    h, w = data.shape
+    t_tobytes = time.monotonic()
+    payload = data.tobytes()
+    t_compress = time.monotonic()
+    if compression == "zstd":
+        payload = zstd.compress(payload)
     t_done = time.monotonic()
     timing = {
         "capture_ms": (t_unpack - t_cap) * 1000,
         "unpack_ms": (t_tobytes - t_unpack) * 1000,
-        "tobytes_ms": (t_done - t_tobytes) * 1000,
+        "tobytes_ms": (t_compress - t_tobytes) * 1000,
+        "compress_ms": (t_done - t_compress) * 1000,
         "payload_bytes": len(payload),
     }
     return payload, h, w, timing
@@ -130,11 +142,13 @@ async def ws_raw(websocket: WebSocket) -> None:
     roi: tuple[int, int] | None = None
     bit_depth: int = 16
     img_format = "raw"
+    # Compression sans perte du RAW (optionnelle) : "none" = historique.
+    compression = "none"
     loop = asyncio.get_event_loop()
     _frame_count = 0
 
     async def recv_loop() -> None:
-        nonlocal fps, running, roi, bit_depth, img_format, credits
+        nonlocal fps, running, roi, bit_depth, img_format, credits, compression
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -169,6 +183,12 @@ async def ws_raw(websocket: WebSocket) -> None:
                     fmt = msg.get("format", "raw")
                     img_format = fmt if fmt in ("raw", "jpeg", "png") else "raw"
                     log.info("[ws/raw] format → %s", img_format)
+                elif msg.get("cmd") == "set_compression":
+                    codec = msg.get("codec", "none")
+                    if codec == "zstd" and not zstd.available():
+                        codec = "none"
+                    compression = codec if codec == "zstd" else "none"
+                    log.info("[ws/raw] compression → %s", compression)
                 elif msg.get("cmd") == "stop":
                     running = False
         except (WebSocketDisconnect, asyncio.CancelledError):
@@ -212,6 +232,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                 # race (caught e.g. a "format":"raw" frame whose payload was
                 # still PNG bytes from the previous setting).
                 cur_roi, cur_bit_depth, cur_format = roi, bit_depth, img_format
+                cur_compression = compression if cur_format == "raw" else "none"
 
                 # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
                 # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
@@ -222,7 +243,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                 async with _capture_lock:
                     if cur_format == "raw":
                         payload, h, w, timing = await loop.run_in_executor(
-                            None, _capture_and_encode, camera, cur_roi, cur_bit_depth
+                            None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression
                         )
                     else:
                         payload, h, w, timing = await loop.run_in_executor(
@@ -244,6 +265,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                     "bayer": camera.bayer_pattern,
                     "bit_depth": cur_bit_depth,
                     "format": cur_format,
+                    "compression": cur_compression,
                     "ts": t0,
                 }).encode()
 
@@ -261,11 +283,12 @@ async def ws_raw(websocket: WebSocket) -> None:
                     total_ms = (t_send_end - t0) * 1000
                     log.info(
                         "[WS/raw] frame #%d: cap=%.0fms unpack=%.0fms tobytes=%.0fms "
-                        "send=%.0fms total=%.0fms size=%.1fkB %s",
+                        "zstd=%.0fms send=%.0fms total=%.0fms size=%.1fkB %s",
                         _frame_count,
                         timing["capture_ms"],
                         timing["unpack_ms"],
                         timing["tobytes_ms"],
+                        timing.get("compress_ms", 0.0),
                         send_ms,
                         total_ms,
                         timing["payload_bytes"] / 1024,

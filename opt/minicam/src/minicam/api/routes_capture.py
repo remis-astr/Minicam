@@ -62,6 +62,34 @@ def _unpack_raw10(raw: np.ndarray, width: int) -> np.ndarray:
     return out
 
 
+def raw_msb8(
+    raw: np.ndarray, bits: int, x0: int, y0: int, width: int, height: int
+) -> np.ndarray:
+    """8 most significant bits of the pixels [y0:y0+height, x0:x0+width] of a
+    packed CSI-2 RAW10/RAW12 frame, as a contiguous uint8 array — without
+    unpacking.
+
+    In both packings every pixel's MSBs already sit in a whole byte (RAW10:
+    4 MSB bytes + 1 LSB byte per 4 pixels, RAW12: 2 MSB bytes + 1 LSB byte
+    per 2 pixels), so gathering those bytes is exactly
+    `unpack_raw(...) >> (bits - 8)`. Cropping inside the same single gather
+    matters: measured on a Pi Zero 2 W, 852×480 → 640×480, 3.8 ms against
+    16–18 ms for unpack + shift + crop, and slicing an uncropped result
+    instead leaves a strided array whose tobytes() costs as much again.
+    Row-stride padding is harmless here since only byte offsets inside the
+    tight packed width are ever read.
+    """
+    if bits == 12:
+        group_px, group_bytes = 2, 3
+    elif bits == 10:
+        group_px, group_bytes = 4, 5
+    else:
+        raise ValueError(f"profondeur RAW non supportée: {bits} bits")
+    px = np.arange(x0, x0 + width)
+    cols = (px // group_px) * group_bytes + px % group_px
+    return np.take(raw[y0:y0 + height], cols, axis=1)
+
+
 def unpack_raw(raw: np.ndarray, bits: int, width: int) -> np.ndarray:
     """Dispatch to the unpacker matching the sensor's active RAW bit depth."""
     if bits == 12:

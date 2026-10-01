@@ -1,5 +1,7 @@
 'use strict';
 
+import { decompress as zstdDecompress } from './fzstd.js';
+
 /**
  * WsFrameReceiver — consomme le flux /ws/raw du Pi Zero 2W.
  *
@@ -11,6 +13,9 @@
  *             width × height valeurs, motif Bayer donné par meta.bayer.
  *             format='jpeg'|'png'   → Uint8Array, bytes JPEG/PNG bruts (déjà
  *             débayerisés par l'ISP) — à décoder côté consommateur.
+ * Compression : meta.compression='zstd' → pixels RAW compressés sans perte
+ *             (trame zstd), décompressés ici : le consommateur reçoit
+ *             toujours le tableau de pixels décrit ci-dessus.
  *
  * Usage :
  *   const rx = new WsFrameReceiver('ws://192.168.7.2/ws/raw');
@@ -39,6 +44,7 @@ export class WsFrameReceiver {
         this._initialRoi      = null;
         this._initialBitDepth = null;
         this._initialFormat   = null;
+        this._initialCompression = null;
         // Contrôle de flux par crédits (0 = désactivé, cadence fixe du serveur).
         // Avec N > 0 : le serveur n'envoie qu'une image par crédit, et les
         // images arrivées pendant un traitement attendent dans une file FIFO
@@ -90,12 +96,13 @@ export class WsFrameReceiver {
      * La reconnexion automatique est gérée en interne.
      * @param {number} [fps] - Débit cible à envoyer au serveur après connexion (1–15).
      */
-    async start(fps, roi, bitDepth, format) {
+    async start(fps, roi, bitDepth, format, compression) {
         this._stopped         = false;
         this._targetFps       = fps ?? null;
         this._initialRoi      = roi ?? null;
         this._initialBitDepth = bitDepth ?? null;
         this._initialFormat   = format ?? null;
+        this._initialCompression = compression ?? null;
         return this._connect();
     }
 
@@ -126,6 +133,13 @@ export class WsFrameReceiver {
         this._initialFormat = format;
         if (this._ws?.readyState === WebSocket.OPEN)
             this._ws.send(JSON.stringify({ cmd: 'set_format', format }));
+    }
+
+    /** Compression du RAW : 'none' (défaut serveur) ou 'zstd' (sans perte). */
+    setCompression(codec) {
+        this._initialCompression = codec;
+        if (this._ws?.readyState === WebSocket.OPEN)
+            this._ws.send(JSON.stringify({ cmd: 'set_compression', codec }));
     }
 
     /** Envoie une commande JSON quelconque sur le WebSocket. */
@@ -164,6 +178,8 @@ export class WsFrameReceiver {
                     ws.send(JSON.stringify({ cmd: 'set_bitdepth', bit_depth: this._initialBitDepth }));
                 if (this._initialFormat != null)
                     ws.send(JSON.stringify({ cmd: 'set_format', format: this._initialFormat }));
+                if (this._initialCompression != null)
+                    ws.send(JSON.stringify({ cmd: 'set_compression', codec: this._initialCompression }));
                 // Crédits envoyés en dernier : les réglages ci-dessus s'appliquent
                 // dès la première image capturée.
                 this._queue = [];
@@ -254,7 +270,21 @@ export class WsFrameReceiver {
         if (buf.byteLength <= rawOffset) return;
 
         let pixels;
-        if (meta.format === 'jpeg' || meta.format === 'png') {
+        if (meta.compression === 'zstd' && meta.format !== 'jpeg' && meta.format !== 'png') {
+            let raw;
+            try {
+                raw = zstdDecompress(new Uint8Array(buf, rawOffset));
+            } catch (e) {
+                console.warn('[WsFrameReceiver] trame zstd invalide', e);
+                return;
+            }
+            if ((meta.bit_depth ?? 16) === 8) {
+                pixels = raw;
+            } else {
+                if (raw.byteOffset % 2) raw = raw.slice();
+                pixels = new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength >> 1);
+            }
+        } else if (meta.format === 'jpeg' || meta.format === 'png') {
             // Bytes JPEG/PNG opaques (déjà débayerisés côté ISP) — pas un tableau
             // de pixels typé, le consommateur (stacker.js) les décode lui-même.
             pixels = new Uint8Array(buf, rawOffset);

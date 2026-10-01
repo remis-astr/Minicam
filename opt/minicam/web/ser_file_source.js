@@ -81,6 +81,7 @@ export class SerFileSource {
     setRoi() {}
     setBitDepth() {}
     setFormat() {}
+    setCompression() {}
 
     async start() {
         this._stopped = false;

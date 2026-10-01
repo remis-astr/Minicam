@@ -52,9 +52,27 @@ Le dépôt suit l'arborescence du Pi :
 
 - **Flux caméra** : buffer de 8 images avec contrôle de flux par crédits
   (`{"cmd": "credit"}` sur `/ws/raw`) — le Pi envoie au maximum de ses
-  capacités, sans image perdue. Mesuré en USB (IMX477) : RAW 8 bits ROI
-  640×480 ≈ 8,7 img/s ; RAW 16 bits 852×480 ≈ 2 img/s. La limite est
-  l'envoi côté Pi (~3,6 Mo/s). Les autres pages gardent la cadence fixe.
+  capacités, sans image perdue. Mesuré en USB (IMX477, mode 480p_bin
+  852×480, pose 2 ms) : RAW 8 bits ROI 640×480 ≈ 33–52 img/s ; RAW 16 bits
+  ≈ 11 img/s ; JPEG ISP ≈ 29 img/s. Le capteur seul sort ~80 img/s. Les
+  autres pages gardent la cadence fixe.
+- **permessage-deflate désactivé** (`[api] ws_deflate = false` par défaut) :
+  uvicorn acceptait cette extension proposée par les navigateurs, et
+  compressait chaque image en zlib, en Python, sur le Pi — c'était le vrai
+  goulot (RAW 8 bits : 12 img/s, et 4 img/s sur une scène texturée).
+  `ws_deflate = true` rétablit l'ancien comportement. Option ignorée avec un
+  uvicorn trop ancien pour la proposer.
+- **RAW 8 bits** : les 8 bits de poids fort sont pris directement dans la
+  trame CSI-2 empaquetée (RAW10/RAW12, ROI comprise) sans dépaquetage —
+  mêmes octets qu'avant, 4 ms au lieu de 25 ms par image sur Pi Zero 2 W.
+- **Compression zstd** (menu Compression, RAW seulement, sans perte) :
+  `{"cmd": "set_compression", "codec": "zstd"}` sur `/ws/raw`, chaque image
+  porte `"compression"` dans ses métadonnées. Compression par la libzstd du
+  système (ctypes, paquet `libzstd1` déjà présent sur Raspberry Pi OS),
+  décompression dans le navigateur par `web/fzstd.js` (fzstd 0.1.1, MIT,
+  copie locale pour le hotspot sans Internet). Planète sur fond noir :
+  300 → 94 Ko (13 ms sur le Pi) ; scène texturée : gain faible. Utile en
+  Wi-Fi ; en USB le lien n'est plus le frein et zstd ralentit un peu.
   Une seule capture RAW à la fois (verrou serveur) : deux flux simultanés
   ont figé la caméra (« Camera frontend has timed out »).
 - **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
@@ -173,6 +191,9 @@ ap_psk = "multicam"   # 8 à 63 caractères
 
 [network]             # facultatif
 usb_ip = "192.168.7.3"  # IP du Pi sur le lien USB ; hôte (PC/M8S) = .1 du /24
+
+[api]                 # facultatif
+ws_deflate = false    # true = compression zlib WebSocket (ancien comportement, lent)
 ```
 
 `minicam-net-init.service` (à chaque démarrage, avant NetworkManager et

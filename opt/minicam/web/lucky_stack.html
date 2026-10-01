@@ -96,6 +96,14 @@
       </select>
     </div>
 
+    <div class="control-row control-row--inline" id="compression-row">
+      <label for="compression-select">Compression</label>
+      <select id="compression-select">
+        <option value="none" selected>Aucune</option>
+        <option value="zstd">zstd (sans perte)</option>
+      </select>
+    </div>
+
     <div class="control-row control-row--inline">
       <label for="roi-select">Résolution ROI</label>
       <select id="roi-select">
@@ -377,11 +385,21 @@ elBitDepth.addEventListener('change', () => {
     }
 });
 
-elFormat.addEventListener('change', () => {
+// Compression sans perte du RAW (zstd) : gain ×3 environ sur une planète
+// sur fond noir, faible sur une scène texturée.
+const elCompression    = document.getElementById('compression-select');
+const elCompressionRow = document.getElementById('compression-row');
+elCompression.addEventListener('change', () => stacker?.setCompression(elCompression.value));
+
+function updateRawRows() {
     elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
+    elCompressionRow.classList.toggle('hidden', elFormat.value !== 'raw');
+}
+elFormat.addEventListener('change', () => {
+    updateRawRows();
     if (stacker) stacker.setFormat(elFormat.value);
 });
-elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
+updateRawRows();
 
 const elRoi = document.getElementById('roi-select');
 elRoi.addEventListener('change', () => {
@@ -436,6 +454,7 @@ btnStart.addEventListener('click', async () => {
             bitDepth:         parseInt(elBitDepth.value),
             roi:              parseRoi(elRoi.value),
             format:           elFormat.value,
+            compression:      elCompression.value,
             awb:              elAwb.checked,
             stretchLow:       parseFloat(elStretchLo.value) / 100,
             stretchHigh:      parseFloat(elStretchHi.value) / 100,

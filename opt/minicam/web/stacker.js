@@ -331,6 +331,7 @@ export class StreamingStacker extends EventTarget {
         this._initialRoi       = options.roi ?? null;
         this._initialBitDepth  = options.bitDepth ?? null;
         this._initialFormat    = options.format ?? 'raw';
+        this._initialCompression = options.compression ?? null;
         this._stretchLow       = options.stretchLow  ?? 0.001;
         this._stretchHigh      = options.stretchHigh ?? 0.999;
         this._stretchBeta      = options.stretchBeta ?? 0;
@@ -436,7 +437,8 @@ export class StreamingStacker extends EventTarget {
         this._receiver = typeof wsUrl === 'string' ? new WsFrameReceiver(wsUrl) : wsUrl;
         if (typeof wsUrl === 'string') this._receiver.setFlowControl(this._flowCredits);
         this._receiver.onFrame = (pixels, meta) => this._onFrame(pixels, meta);
-        await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth, this._initialFormat);
+        await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth, this._initialFormat,
+                                   this._initialCompression);
     }
 
     pause()  { this._paused = true; }
@@ -554,6 +556,12 @@ export class StreamingStacker extends EventTarget {
     }
 
     flush(n = 3) { this._receiver?.flush(n); }
+
+    /** Compression du RAW : 'none' ou 'zstd' (sans perte). */
+    setCompression(codec) {
+        this._initialCompression = codec;
+        this._receiver?.setCompression?.(codec);
+    }
 
     /** Change le format de flux : 'raw' (Bayer), 'jpeg' ou 'png' (ISP). */
     setFormat(format) {
