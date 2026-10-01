@@ -159,9 +159,9 @@
 <script type="module">
 import { StreamingStacker } from './stacker.js';
 import { DngFileSource } from './dng_file_source.js';
-import { detectGpu, ControlWs, savePng, saveFits, formatDate } from './ui_common.js';
+import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl } from './ui_common.js';
 
-const WS_RAW = `ws://${location.host}/ws/raw`;
+const WS_RAW = wsUrl('/ws/raw');
 
 const canvas         = document.getElementById('stack-canvas');
 const placeholder    = document.getElementById('preview-placeholder');

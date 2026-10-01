@@ -136,6 +136,52 @@ Le dépôt suit l'arborescence du Pi :
   FWHM des étoiles 7,0 px (image seule) → 7,2 px (stack) ; GPU = CPU à
   3·10⁻⁵ près.
 
+## HTTPS (WebGPU sur téléphone et tablette)
+
+Les navigateurs n'exposent WebGPU que sur une page sûre (HTTPS ou
+`localhost`) : sans HTTPS, un téléphone sur le hotspot calcule tout sur son
+processeur. Le HTTP (port 8000) reste disponible et inchangé ; le HTTPS
+s'ajoute sur un second port, dans le même service (une seule caméra). Les
+pages choisissent `wss://` ou `ws://` selon leur protocole.
+
+1. Sur le Pi : `sudo minicam-tls-setup` — crée l'autorité de
+   certification « Multicam CA » (`/etc/minicam/tls/ca.crt` + `ca.key`,
+   10 ans, faite une seule fois) et le certificat du serveur (825 jours, maximum
+   accepté par iOS) pour `localhost`, le nom d'hôte, `<hôte>.local`, l'IP
+   USB de `config.toml` et le hotspot 192.168.4.1. Noms ou IP en plus
+   (adresse sur la box…) : `sudo minicam-tls-setup 192.168.1.42`. Relancer
+   le script réémet le certificat serveur avec la même autorité, sans rien
+   refaire sur les appareils.
+   **Plusieurs Multicam** : utiliser la même autorité sur toutes, pour
+   qu'un appareil n'installe qu'un seul certificat, valable pour toutes.
+   Sauvegarder `ca.crt` et `ca.key` de la première carte (sur le PC :
+   `ssh admin@<ip> 'sudo cat /etc/minicam/tls/ca.key' > ca.key`, idem
+   `ca.crt`), les copier sur chaque autre carte puis
+   `sudo minicam-tls-setup --ca <dossier>` (clé vérifiée contre le
+   certificat). `ca.key` est secrète — qui la possède peut fabriquer des
+   certificats que vos appareils accepteront : ne jamais la publier ni la
+   mettre dans le dépôt (`*.key` est dans `.gitignore`) ; chaque utilisateur
+   du projet crée la sienne.
+2. `/etc/minicam/config.toml` : `[api]` `https_port = 8443`, puis
+   `sudo systemctl restart minicam-api`.
+3. Sur chaque appareil, une fois : ouvrir `http://<ip>:8000/ca.crt`.
+   - Android : Paramètres → Sécurité → Chiffrement et identifiants →
+     Installer un certificat → Certificat CA → choisir `multicam-ca.crt`.
+   - iPhone/iPad : autoriser le profil téléchargé (Réglages → Profil
+     téléchargé → Installer), puis Réglages → Général → Informations →
+     Réglages des certificats → activer la confiance totale pour
+     « Multicam … CA ».
+   - PC : importer `multicam-ca.crt` comme autorité dans le navigateur.
+4. Ouvrir `https://192.168.4.1:8443/` (hotspot) ou `https://<ip USB>:8443/`.
+
+Chiffrement : le Pi Zero 2 W n'a pas d'instructions AES (AES-GCM ~27 Mo/s
+contre ~166 Mo/s pour ChaCha20-Poly1305), le serveur impose donc TLS 1.2 +
+ECDHE-ChaCha20-Poly1305 (AES-GCM en secours). Mesuré en USB, RAW 8 bits
+640×480 : 44 img/s (13,5 Mo/s) en HTTPS contre 51 img/s en HTTP (28 img/s
+en TLS 1.3 AES-256-GCM) — au-dessus du débit du Wi-Fi. WebGPU demande aussi
+un navigateur qui le prend en charge (Chrome Android 12+, Safari iOS
+récent…) ; sous Linux, Chrome reste à débloquer (voir « GPU émulé »).
+
 ## Installation sur une nouvelle carte SD
 
 Procédure complète, validée sur `multicam2` (Pi Zero 2 W + IMX477). Les
@@ -222,6 +268,7 @@ sudo pip3 install --break-system-packages --upgrade fastapi uvicorn
 | `etc/minicam/m8s-forward.nft` | `/etc/minicam/` |
 | `usr/local/bin/minicam-usb-route-watch` | `/usr/local/bin/` (mode 755) |
 | `usr/local/bin/minicam-net-init` | `/usr/local/bin/` (mode 755) |
+| `usr/local/bin/minicam-tls-setup` | `/usr/local/bin/` (mode 755, facultatif : HTTPS) |
 | `usr/src/` | `/usr/src/minicam-drivers/` (compilés à l'étape 7) |
 
 Puis `/etc/minicam/config.toml` :
@@ -239,6 +286,7 @@ usb_ip = "192.168.7.3"  # IP du Pi sur le lien USB ; hôte (PC/M8S) = .1 du /24
 
 [api]                 # facultatif
 ws_deflate = false    # true = compression zlib WebSocket (ancien comportement, lent)
+https_port = 0        # 8443 = HTTPS en plus du HTTP (voir « HTTPS » ci-dessous)
 ```
 
 `minicam-net-init.service` (à chaque démarrage, avant NetworkManager et

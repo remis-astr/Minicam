@@ -1,6 +1,6 @@
 'use strict';
 
-const WS_URL = `ws://${location.host}/ws/control`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/control`;
 
 let ws = null;
 let reconnectTimer = null;

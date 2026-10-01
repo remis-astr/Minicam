@@ -26,7 +26,7 @@
 <script type="module">
 import { WsFrameReceiver } from './ws_frame_receiver.js';
 
-const WS_URL = `ws://${location.host}/ws/raw`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/raw`;
 
 const canvas   = document.getElementById('canvas');
 const ctx      = canvas.getContext('2d');

@@ -42,7 +42,7 @@ canvas { display: block; max-width: 640px; margin: 1rem 0; border: 1px solid #44
 <script type="module">
 import { StreamingStacker } from './stacker.js';
 
-const WS_RAW = `ws://${location.host}/ws/raw`;
+const WS_RAW = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/raw`;
 const elTests  = document.getElementById('tests');
 const btnRun   = document.getElementById('btn-run');
 const btnStop  = document.getElementById('btn-stop');

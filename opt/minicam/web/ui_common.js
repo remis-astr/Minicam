@@ -4,6 +4,11 @@
 // GPU detection
 // ---------------------------------------------------------------------------
 
+/** URL WebSocket du Pi : wss:// sur une page HTTPS (sinon bloqué), ws:// sinon. */
+export function wsUrl(path) {
+    return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;
+}
+
 export async function detectGpu() {
     if (!navigator.gpu) return { ok: false, reason: 'WebGPU non disponible dans ce navigateur.' };
     try {
@@ -29,7 +34,7 @@ export async function detectGpu() {
 export class ControlWs {
     constructor() {
         this._ws    = null;
-        this._url   = `ws://${location.host}/ws/control`;
+        this._url   = wsUrl('/ws/control');
         this.onStatus = null;  // (msg) => void
         this.onError  = null;  // (detail) => void
     }

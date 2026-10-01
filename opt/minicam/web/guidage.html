@@ -352,7 +352,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) padRe
 // Réglages caméra via le canal de contrôle d'allsky (même origine que la page).
 let camWs = null;
 function camConnect() {
-  camWs = new WebSocket(`ws://${location.host}/ws/control`);
+  camWs = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/control`);
   camWs.onopen = () => camWs.send(JSON.stringify({ cmd: 'status' }));
   camWs.onmessage = ev => {
     const m = JSON.parse(ev.data);
