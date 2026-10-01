@@ -497,6 +497,13 @@ class CameraController:
             "exposure_ms": self.exposure_us / 1000,
             "raw_mode": self.raw_mode,
             "raw_modes": [m.name for m in self.profile.raw_modes],
+            # Dimensions livrées de chaque mode (Live Stack : choix du mode et du ROI)
+            "raw_modes_info": [
+                {"name": m.name, "width": m.delivered_size[0], "height": m.delivered_size[1],
+                 "binned": m.binned, "bits": bits_from_format(m.format)}
+                for m in self.profile.raw_modes
+            ],
+            "raw_size": list(self.raw_size),
             "wb_red": self.wb_red,
             "wb_blue": self.wb_blue,
             "contrast": self.contrast,

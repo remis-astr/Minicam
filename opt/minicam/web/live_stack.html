@@ -78,11 +78,14 @@
     <h3 class="section-title">Live Stack</h3>
 
     <div class="control-row control-row--inline">
-      <label for="roi-select">Résolution ROI</label>
+      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+      <select id="mode-select"><option value="">—</option></select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
       <select id="roi-select">
-        <option value="full" selected>1920×1080 (plein champ)</option>
-        <option value="1280x720">1280×720</option>
-        <option value="640x480">640×480</option>
+        <option value="full" selected>Plein champ</option>
       </select>
     </div>
 
@@ -107,9 +110,18 @@
       <span class="range-val" id="stretch-beta-val">0</span>
     </div>
     <div class="range-row">
-      <label for="stretch-hi">Saturation <span class="input-hint">(percentile blanc)</span></label>
+      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
       <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+    <div class="range-row">
+      <label for="saturation">Saturation <span class="input-hint">(couleurs)</span></label>
+      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+      <span class="range-val" id="saturation-val">100 %</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
+      <input type="checkbox" id="bg-neutral" checked style="width:auto;">
     </div>
     <div class="button-row">
       <button id="btn-start" class="btn-green">▶ Démarrer</button>
@@ -192,6 +204,10 @@ const elSeqLabel     = document.getElementById('seq-progress-label');
 const elSeqStatus    = document.getElementById('seq-status');
 
 let stacker     = null;
+// Stack arrêté, gardé pour l'affichage : les réglages d'image (étirement,
+// saturation, fond neutre) et les exports restent actifs après ■ Arrêter.
+let lastStacker = null;
+const view = () => stacker ?? lastStacker;
 let seqRunning  = false;
 
 function parseRoi(val) {
@@ -215,6 +231,8 @@ detectGpu().then(({ ok, reason }) => {
 // Camera WS
 const ctrlWs = new ControlWs();
 ctrlWs.onStatus = (msg) => {
+    if (msg.raw_modes_info) fillModes(msg.raw_modes_info, msg.raw_mode);
+    else if (msg.cmd === 'ack' && msg.raw_mode) ctrlWs.requestStatus();   // mode changé : dimensions à jour
     if (msg.gain !== undefined) elGain.value = parseFloat(msg.gain).toFixed(1);
     if (msg.exposure_ms !== undefined) elExpo.value = parseFloat(msg.exposure_ms).toFixed(1);
     elStatus.className   = 'badge connected';
@@ -226,9 +244,31 @@ ctrlWs.onError = () => {
 };
 ctrlWs.connect();
 
-document.getElementById('align-toggle').addEventListener('change', (ev) => {
-    if (stacker) stacker.setAlignMode(ev.target.checked ? 'surface' : 'none');
-});
+// Alignement : choisi au démarrage (grisé pendant l'empilement)
+const elAlign = document.getElementById('align-toggle');
+
+// Mode capteur et ROI : listes construites depuis les modes du capteur
+// branché (statut /ws/control) — le ROI ne propose que des recadrages qui
+// tiennent dans le mode choisi. Grisés pendant l'empilement.
+const elMode = document.getElementById('mode-select');
+const ROI_CHOICES = [[1920, 1080], [1280, 720], [1024, 768], [800, 600], [640, 480], [512, 512]];
+function fillRoi(w, h) {
+    const prev = elRoi.value;
+    elRoi.innerHTML = '';
+    elRoi.add(new Option(`Plein champ (${w}×${h})`, 'full'));
+    for (const [rw, rh] of ROI_CHOICES)
+        if (rw <= w && rh <= h && (rw < w || rh < h)) elRoi.add(new Option(`${rw}×${rh}`, `${rw}x${rh}`));
+    elRoi.value = [...elRoi.options].some((o) => o.value === prev) ? prev : 'full';
+}
+function fillModes(info, current) {
+    elMode.innerHTML = '';
+    for (const m of info)
+        elMode.add(new Option(`${m.name} — ${m.width}×${m.height}${m.binned ? ' (binning)' : ''}`, m.name));
+    elMode.value = current;
+    const cur = info.find((m) => m.name === current);
+    if (cur) fillRoi(cur.width, cur.height);
+}
+elMode.addEventListener('change', () => { if (elMode.value) ctrlWs.setMode(elMode.value); });
 
 const elRoi = document.getElementById('roi-select');
 elRoi.addEventListener('change', () => {
@@ -258,30 +298,41 @@ function stretchValues() {
 elStretchLo.addEventListener('input', () => {
     elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
     const { lo, hi, beta } = stretchValues();
-    stacker?.setStretch(lo, hi, beta);
+    view()?.setStretch(lo, hi, beta);
 });
 elStretchBeta.addEventListener('input', () => {
     const v = parseFloat(elStretchBeta.value);
     elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
-    stacker?.setStretchBeta(v);
+    view()?.setStretchBeta(v);
 });
 elStretchHi.addEventListener('input', () => {
     elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
     const { lo, hi, beta } = stretchValues();
-    stacker?.setStretch(lo, hi, beta);
+    view()?.setStretch(lo, hi, beta);
 });
+const elSaturation = document.getElementById('saturation');
+const elBgNeutral  = document.getElementById('bg-neutral');
+elSaturation.addEventListener('input', () => {
+    document.getElementById('saturation-val').textContent = elSaturation.value + ' %';
+    view()?.setSaturation(parseInt(elSaturation.value) / 100);
+});
+elBgNeutral.addEventListener('change', () => view()?.setBgNeutral(elBgNeutral.checked));
+
 function updateStats() {
-    const sc = stacker?.stackedCount ?? 0;
-    const expS = stacker?._totalExpMs != null ? (stacker._totalExpMs / 1000).toFixed(1) : '—';
-    const gainM = stacker && stacker._stackedCount > 0
-        ? (stacker._gainSum / stacker._stackedCount).toFixed(1) : '—';
-    const r = stacker?.lastStarReport;
-    const rej = stacker?.rejectedCount ?? 0;
+    const v = view();
+    const sc = v?.stackedCount ?? 0;
+    const expS = v?._totalExpMs != null ? (v._totalExpMs / 1000).toFixed(1) : '—';
+    const gainM = v && v._stackedCount > 0
+        ? (v._gainSum / v._stackedCount).toFixed(1) : '—';
+    const r = v?.lastStarReport;
+    const rej = v?.rejectedCount ?? 0;
     let starLine = '';
     if (r) {
         starLine = r.accepted
-            ? `\nÉtoiles : ${r.inliers}/${r.stars} appariées, résidu ${r.rms.toFixed(2)} px, FWHM ${r.fwhm.toFixed(1)} px` +
-              `\nDérive : ${r.dx.toFixed(0)}, ${r.dy.toFixed(0)} px, rotation ${r.rotationDeg.toFixed(2)}°`
+            ? (r.method === 'sans alignement' ? `\nSans alignement — ${r.stars} étoiles, FWHM ${r.fwhm.toFixed(1)} px`
+               : `\nÉtoiles : ${r.inliers}/${r.stars} appariées, résidu ${r.rms.toFixed(2)} px, FWHM ${r.fwhm.toFixed(1)} px`) +
+              `\nDérive : ${r.dx.toFixed(0)}, ${r.dy.toFixed(0)} px, rotation ${r.rotationDeg.toFixed(2)}°` +
+              `\nFlux ×${(r.scale ?? 1).toFixed(2)}, poids ${(r.weight ?? 1).toFixed(2)}, pixels chauds ${r.hotPixels ?? 0}, rejets σ ${r.clipped ?? 0}`
             : `\nDernière image rejetée : ${r.reason}`;
     }
     elStats.textContent =
@@ -313,6 +364,7 @@ btnStart.addEventListener('click', async () => {
     elStatus.textContent = 'Connexion flux…';
 
     const { lo, hi } = stretchValues();
+    lastStacker = null;
     stacker = new StreamingStacker({
         mode:    'live',
         canvas,
@@ -320,9 +372,13 @@ btnStart.addEventListener('click', async () => {
             stretchLow:  lo,
             stretchHigh: hi,
             stretchBeta: parseFloat(elStretchBeta.value),
+            saturation:  parseInt(elSaturation.value) / 100,
+            bgNeutral:   elBgNeutral.checked,
             // Alignement sur les étoiles : détection + triangles + rotation/translation (dso_stacker.js)
-            alignMode:   document.getElementById('align-toggle').checked ? 'stars' : 'none',
-            starAlign:   { model: 'similarity' },
+            // Case décochée : même empilement ciel profond, sans recalage
+            // (monture guidée) — pixels chauds, verts, bruit de ligne, rejet σ inclus.
+            alignMode:   'stars',
+            starAlign:   { model: 'similarity', align: elAlign.checked },
             roi:         parseRoi(elRoi.value),
         },
     });
@@ -349,10 +405,14 @@ btnStart.addEventListener('click', async () => {
             onEnd: () => {
                 elStatus.className   = 'badge disconnected';
                 elStatus.textContent = 'DNG terminé';
+                stacker?.finish();   // dernière relecture : l'aperçu montre le stack complet
             },
         })
         : WS_RAW;
     elDngFiles.disabled = true;
+    elAlign.disabled = true;
+    elMode.disabled = true;
+    elRoi.disabled = true;
     try {
         await stacker.start(source);
         elStatus.className   = 'badge connected';
@@ -369,9 +429,18 @@ btnStart.addEventListener('click', async () => {
     }
 });
 
-btnStop.addEventListener('click', () => {
-    stacker?.stop();
+btnStop.addEventListener('click', async () => {
+    // Garder le stack : plus de nouvelles images, relecture complète (finish)
+    // tant que le worker existe, puis arrêt du flux et des workers.
+    const s = stacker;
     stacker = null;
+    lastStacker = s;   // dès maintenant : statistiques et réglages restent sur ce stack
+    if (s) {
+        s.pause();
+        try { await s.finish(); } catch (e) { console.warn('[Stack] finish:', e); }
+        s.stop();
+    }
+    updateStats();
     _stopSeq(false);
     elStatus.className   = 'badge disconnected';
     elStatus.textContent = 'Déconnecté';
@@ -383,6 +452,7 @@ btnReset.addEventListener('click', () => {
     if (stacker) {
         stacker.reset();
     } else {
+        lastStacker = null;
         btnSavePng.disabled  = true;
         btnSaveFits.disabled = true;
         placeholder.style.display = '';
@@ -397,10 +467,11 @@ btnSavePng.addEventListener('click', () => {
 });
 
 btnSaveFits.addEventListener('click', async () => {
-    if (!stacker) return;
+    const v = view();
+    if (!v) return;
     btnSaveFits.disabled = true;
     try {
-        const result = await stacker.getStackResult();
+        const result = await v.getStackResult();
         saveFits(result, `live_${formatDate()}.fits`);
     } catch (e) {
         elStats.textContent = 'Erreur FITS : ' + e.message;
@@ -413,6 +484,9 @@ function _resetUI() {
     btnStart.classList.remove('hidden');
     btnStop.classList.add('hidden');
     elDngFiles.disabled = false;
+    elAlign.disabled = false;
+    elMode.disabled = false;
+    elRoi.disabled = false;
 }
 
 // ---------------------------------------------------------------------------

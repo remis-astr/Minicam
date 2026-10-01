@@ -62,6 +62,7 @@ export class ControlWs {
     setGain(gain)     { this._send({ cmd: 'set_gain',     value: gain }); }
     setExposure(ms)   { this._send({ cmd: 'set_exposure', value_ms: ms }); }
     requestStatus()   { this._send({ cmd: 'status' }); }
+    setMode(name)     { this._send({ cmd: 'set_mode', value: name }); }
     close()           { this._ws?.close(); this._ws = null; }
 }
 

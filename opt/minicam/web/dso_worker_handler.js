@@ -3,8 +3,8 @@
  * Messages du mode « étoiles » (Live Stack ciel profond), partagés par
  * webgpu_stacking_worker.js et cpu_stacking_worker.js — voir dso_stacker.js.
  *
- *   init-stacking { starAlign: {…options}, width, height }  → init-stacking-done
- *   stack-frame-stars { requestId, rgbaBuffer, weight }      → stack-stars-done { requestId, report }
+ *   init-stacking { starAlign: {…options}, width, height, bayer } → init-stacking-done
+ *   stack-frame-stars { requestId, raw (Uint16Array Bayer), black }  → stack-stars-done { requestId, report }
  *   get-stack-snapshot (mode étoiles actif)                  → stack-snapshot-complete
  *   cleanup                                                  → libère, puis traitement habituel
  *
@@ -22,7 +22,8 @@ export async function handleDsoMessage(data, { forceCpu = false } = {}) {
         try {
             dso?.destroy();
             dso = null;
-            dso = await DsoStacker.create({ width: data.width, height: data.height, forceCpu, ...data.starAlign });
+            dso = await DsoStacker.create({ width: data.width, height: data.height, bayer: data.bayer,
+                                           forceCpu, ...data.starAlign });
             self.postMessage({ type: 'init-stacking-done', outWidth: data.width, outHeight: data.height,
                                backend: dso.backend });
         } catch (err) {
@@ -38,8 +39,8 @@ export async function handleDsoMessage(data, { forceCpu = false } = {}) {
             return true;
         }
         try {
-            const rgba = data.rgbaBuffer instanceof Float32Array ? data.rgbaBuffer : new Float32Array(data.rgbaBuffer);
-            const report = await dso.addFrame(rgba, { weight: data.weight ?? 1, black: data.black ?? 0 });
+            const raw = data.raw instanceof Uint16Array ? data.raw : new Uint16Array(data.raw);
+            const report = await dso.addFrame(raw, { black: data.black ?? 0 });
             delete report.M;
             self.postMessage({ type: 'stack-stars-done', requestId, report });
         } catch (err) {

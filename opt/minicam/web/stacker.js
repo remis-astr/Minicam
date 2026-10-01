@@ -273,9 +273,25 @@ function applySaturation(d, n, sat) {
 // ---------------------------------------------------------------------------
 
 function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
-                         contrast = 0, clahe = 0, saturation = 1) {
+                         contrast = 0, clahe = 0, saturation = 1, bgNeutral = false) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
+    // Fond neutre : médianes R, G, B ramenées à leur moyenne (retire la
+    // dominante du ciel ; additif, n'affecte pas les rapports des étoiles)
+    if (bgNeutral) {
+        const ch = [[], [], []];
+        for (let i = 0; i < n; i += 16) {
+            if (rgba[i*4+3] <= 0) continue;   // pixel jamais couvert (stack ciel profond)
+            ch[0].push(rgba[i*4]); ch[1].push(rgba[i*4+1]); ch[2].push(rgba[i*4+2]);
+        }
+        if (ch[0].length) {
+            const med = ch.map((a) => a.sort((p, q) => p - q)[a.length >> 1]);
+            const m = (med[0] + med[1] + med[2]) / 3;
+            for (let i = 0; i < n; i++) {
+                rgba[i*4] -= med[0] - m; rgba[i*4+1] -= med[1] - m; rgba[i*4+2] -= med[2] - m;
+            }
+        }
+    }
     const [gR, gG, gB] = awbGains ?? [1, 1, 1];
 
     // Percentiles de luminance (échantillon 1/16 pour rapidité) — calculés
@@ -382,6 +398,7 @@ export class StreamingStacker extends EventTarget {
         this._contrast         = options.contrast ?? 0;
         this._clahe            = options.clahe ?? 0;
         this._saturation       = options.saturation ?? 1;
+        this._bgNeutral        = options.bgNeutral ?? false;
         // Mode alignMode 'stars' (ciel profond) : options de dso_stacker.js
         this._starAlign        = options.starAlign ?? {};
         // Ondelettes + CLAHE : coûteux, appliqués seulement une fois le stack
@@ -528,6 +545,8 @@ export class StreamingStacker extends EventTarget {
     setClahe(strength) { this._clahe = strength; this._scheduleRender(); }
     /** Saturation des couleurs (1 = inchangée), appliquée à l'aperçu en direct. */
     setSaturation(sat) { this._saturation = sat; this._scheduleRender(); }
+    /** Fond de ciel neutre à l'affichage (médianes R, G, B égalisées). */
+    setBgNeutral(on) { this._bgNeutral = on; this._scheduleRender(); }
 
     /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
     setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
@@ -539,6 +558,7 @@ export class StreamingStacker extends EventTarget {
      * avant stop(), tant que le worker d'empilement existe.
      */
     async finish() {
+        await this._inflight;   // image en cours (ses erreurs sont déjà signalées)
         if (this._stackWorker && this._initialized) await this._updatePreview();
         this.setPostProcessing(true);
         console.log('[Stacker] ' + this.timingSummary());
@@ -655,7 +675,8 @@ export class StreamingStacker extends EventTarget {
     _onFrame(pixels, meta) {
         if (this._paused || this._stopped) return;
         this._receiver.setProcessing(true);
-        this._processFrame(pixels, meta)
+        // gardée : finish() attend l'image en cours avant la relecture finale
+        this._inflight = this._processFrame(pixels, meta)
             .catch((err) => {
                 this.dispatchEvent(new CustomEvent('error', { detail: { message: err.message } }));
             })
@@ -670,6 +691,22 @@ export class StreamingStacker extends EventTarget {
         const cropSize     = srcW;
         const bayerPattern = BAYER_INT[bayer] ?? 0;
         const frameIdx     = this._frameIndex++;
+
+        // Ciel profond : pixels bruts Bayer directement au worker d'empilement
+        // (pixels chauds, étoiles, drizzle Bayer — dso_stacker.js), sans
+        // débayérisage ni score de netteté.
+        if (this._alignMode === 'stars') {
+            if (format !== 'raw') throw new Error(`alignement étoiles : format RAW requis (reçu ${format})`);
+            let tStep = performance.now();
+            const lap = (key) => { const t = performance.now(); this.timings[key].push(t - tStep); tStep = t; };
+            if (this._initialized && (srcW !== this._cropW || srcH !== this._cropH)) this.reset();
+            const raw = bitDepth === 8
+                ? Uint16Array.from(pixels, (v) => v << 8)
+                : new Uint16Array(pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength));
+            await this._processStarsFrame(raw, srcW, srcH, bayer, frameIdx, gain, exposure_ms, lap,
+                                          meta.black_level ?? 0);
+            return;
+        }
 
         // 1. Analyze — Bayer (debayer + score Laplacian) ou image déjà
         // débayerisée par l'ISP (JPEG/PNG, décodage navigateur + score).
@@ -699,14 +736,6 @@ export class StreamingStacker extends EventTarget {
         if (this._initialized && (frameW !== this._cropW || frameH !== this._cropH)) {
             console.log(`[Stacker] dimensions ${this._cropW}×${this._cropH} → ${frameW}×${frameH} — reset`);
             this.reset();
-        }
-
-        // Ciel profond : alignement sur les étoiles, tout dans le worker
-        // d'empilement (dso_stacker.js) — pas de grille d'AP ni de seuil de netteté.
-        if (this._alignMode === 'stars') {
-            await this._processStarsFrame(analyzed, frameW, frameH, frameIdx, gain, exposure_ms, lap,
-                                          meta.black_level ?? 0);
-            return;
         }
 
         // 2. Qualité adaptative — fenêtre glissante 50 frames, seuil = percentile (1 - threshold)
@@ -772,13 +801,10 @@ export class StreamingStacker extends EventTarget {
         }
     }
 
-    // Mode 'stars' : une image → détection, appariement, rejet éventuel,
-    // recalage et accumulation dans le worker ; compte rendu dans
+    // Mode 'stars' : une image Bayer → pixels chauds, étoiles, appariement,
+    // rejet éventuel, drizzle dans le worker ; compte rendu dans
     // lastStarReport et dans l'événement 'frame' (detail.stars).
-    async _processStarsFrame(analyzed, w, h, frameIdx, gain, exposure_ms, lap, blackLevel = 0) {
-        const rgba = analyzed.float32Buffer
-            ? new Float32Array(analyzed.float32Buffer)
-            : Float32Array.from(new Uint8Array(analyzed.uint8Buffer), (v) => v / 255);
+    async _processStarsFrame(raw, w, h, bayer, frameIdx, gain, exposure_ms, lap, blackLevel = 0) {
         if (!this._initialized) {
             this._cropW = w;
             this._cropH = h;
@@ -791,7 +817,7 @@ export class StreamingStacker extends EventTarget {
                     }
                 };
                 this._stackWorker.addEventListener('message', handler);
-                this._stackWorker.postMessage({ type: 'init-stacking', width: w, height: h,
+                this._stackWorker.postMessage({ type: 'init-stacking', width: w, height: h, bayer,
                                                 starAlign: this._starAlign });
             });
             this._initialized = true;
@@ -808,11 +834,9 @@ export class StreamingStacker extends EventTarget {
                 }
             };
             this._stackWorker.addEventListener('message', handler);
-            // Noir capteur en unités 0–1 (pixels 16 bits normalisés par 65535 ;
-            // en 8 bits, l'octet de poids fort /255 donne la même échelle).
-            this._stackWorker.postMessage({ type: 'stack-frame-stars', requestId, rgbaBuffer: rgba,
-                                            black: blackLevel / 65535 },
-                                          [rgba.buffer]);
+            // Noir capteur en ADU 16 bits, même échelle que les pixels
+            this._stackWorker.postMessage({ type: 'stack-frame-stars', requestId, raw, black: blackLevel },
+                                          [raw.buffer]);
         });
         lap('stack');
         this._lastStarReport = report;
@@ -1052,16 +1076,19 @@ export class StreamingStacker extends EventTarget {
 
     // Lit le stack courant depuis le GPU, étire et dessine sur le canvas
     async _updatePreview() {
+        // worker gardé localement : stop() peut le retirer pendant l'attente
+        const wk = this._stackWorker;
+        if (!wk) return;
         const snap = await new Promise((resolve) => {
             const handler = ({ data }) => {
                 if (!data) return;
                 if (data.type === 'stack-snapshot-complete' || data.type === 'snapshot-error') {
-                    this._stackWorker.removeEventListener('message', handler);
+                    wk.removeEventListener('message', handler);
                     resolve(data.type === 'stack-snapshot-complete' ? data : null);
                 }
             };
-            this._stackWorker.addEventListener('message', handler);
-            this._stackWorker.postMessage({ type: 'get-stack-snapshot' });
+            wk.addEventListener('message', handler);
+            wk.postMessage({ type: 'get-stack-snapshot' });
         });
         if (!snap?.float32Buffer) return;
         this._lastSnap = { data: new Float32Array(snap.float32Buffer), width: snap.width, height: snap.height };
@@ -1087,7 +1114,7 @@ export class StreamingStacker extends EventTarget {
                                : snap.data;
         stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
                         this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
-                        this._saturation);
+                        this._saturation, this._bgNeutral);
         this.dispatchEvent(new CustomEvent('preview'));
     }
 }

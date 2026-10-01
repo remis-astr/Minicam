@@ -49,9 +49,14 @@ def _center_crop(arr, roi: tuple[int, int] | None):
     return arr[y0 : y0 + h, x0 : x0 + w]
 
 
-def _black_level(meta) -> float | None:
+def _black_level(meta, camera=None) -> float | None:
+    """Niveau de noir (échelle 16 bits) : celui que libcamera renvoie pour
+    l'image, sinon celui du profil du capteur."""
     levels = (meta or {}).get("SensorBlackLevels")
-    return sum(levels) / len(levels) if levels else None
+    if levels:
+        return sum(levels) / len(levels)
+    fallback = getattr(getattr(camera, "profile", None), "black_level", 0)
+    return float(fallback) if fallback else None
 
 
 def _capture_and_encode(
@@ -85,7 +90,7 @@ def _capture_and_encode(
     timing = {
         # Niveau de noir du capteur (libcamera, échelle 16 bits comme les
         # pixels envoyés) — à soustraire avant toute calibration couleur.
-        "black_level": _black_level(meta),
+        "black_level": _black_level(meta, camera),
         "capture_ms": (t_unpack - t_cap) * 1000,
         "unpack_ms": (t_tobytes - t_unpack) * 1000,
         "tobytes_ms": (t_compress - t_tobytes) * 1000,

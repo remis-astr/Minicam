@@ -72,6 +72,10 @@ class SensorProfile:
     # a full reboot, unlike everything else in this profile.
     dtoverlay: str
     default_noise_reduction: int = 1
+    # Niveau de noir, échelle 16 bits (= rpi.black_level du fichier de réglage
+    # libcamera du capteur). Secours seulement : le flux /ws/raw transmet la
+    # valeur que libcamera renvoie image par image (SensorBlackLevels).
+    black_level: int = 0
 
     def get_raw_mode(self, name: str) -> RawMode:
         for m in self.raw_modes:
@@ -118,6 +122,7 @@ IMX327 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=64.0,
     dtoverlay="imx290,clock-frequency=74250000",
+    black_level=3840,
 )
 
 # Same 1920x1080 2.9µm-pixel family as the IMX327, driven by the very same
@@ -134,6 +139,7 @@ IMX462 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=64.0,
     dtoverlay="imx462,clock-frequency=74250000",
+    black_level=3840,
 )
 
 # Native full res is 4056x3040 (12.3 MP) — far too heavy to JPEG-encode live
@@ -202,6 +208,7 @@ IMX477 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=16.0,
     dtoverlay="imx477",
+    black_level=4096,
 )
 
 # Starvis 2 sensors (IMX585/IMX678/IMX662): out-of-tree drivers by Will Whang
@@ -223,6 +230,7 @@ IMX585 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=64.0,
     dtoverlay="imx585,2lane",
+    black_level=3200,
 )
 
 IMX678 = SensorProfile(
@@ -235,6 +243,7 @@ IMX678 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=64.0,
     dtoverlay="imx678,2lane",
+    black_level=3200,
 )
 
 IMX662 = SensorProfile(
@@ -246,6 +255,7 @@ IMX662 = SensorProfile(
     raw_format="SRGGB12_CSI2P",
     gain_max=64.0,
     dtoverlay="imx662,2lane",
+    black_level=3200,
 )
 
 SENSOR_PROFILES: dict[str, SensorProfile] = {

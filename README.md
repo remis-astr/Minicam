@@ -124,17 +124,58 @@ Le dépôt suit l'arborescence du Pi :
   mêmes étoiles à 0,0001 px), appariement ≈ 5 ms, 312/312 images alignées
   (dérive jusqu'à ~380 px, recadrage de −5,9°), résidu médian 0,57 px.
 - **Empilement** (`web/dso_stacker.js`, case « Alignement étoiles » = mode
-  `alignMode: 'stars'`) : dans le worker d'empilement (GPU, ou CPU sans
-  WebGPU), pour chaque image : soustraction du niveau de noir (DNG :
-  `BlackLevel` ; caméra : `black_level` des métadonnées `/ws/raw`, tiré de
-  `SensorBlackLevels` de libcamera, échelle 16 bits), détection, appariement
-  avec la 1re image, rejet si l'alignement échoue, normalisation additive du
-  fond (écart de médiane par canal avec la référence), recalage bilinéaire
-  et accumulation avec carte de couverture (bords non assombris). Le
-  planétaire (grille d'AP) est inchangé. Mesuré, 312 DNG M27 : 312/312
-  empilées, ~0,19 s/image (débayérisage CPU 116 ms + empilement 74 ms),
-  FWHM des étoiles 7,0 px (image seule) → 7,2 px (stack) ; GPU = CPU à
-  3·10⁻⁵ près.
+  `alignMode: 'stars'`), directement sur les **pixels bruts Bayer** (le
+  stacker les envoie au worker d'empilement, sans débayérisage), sur GPU ou
+  à l'identique sur CPU. Pour chaque image :
+  1. bruit de ligne retiré (décalage propre à chaque ligne et couleur,
+     mesuré contre les lignes voisines de même couleur, hors étoiles),
+     pixels chauds / morts corrigés (8 voisins de même couleur ; le
+     critère épargne le cœur des étoiles), égalisation locale des deux
+     verts Bayer (Gr/Gb). Sans dithering (caméra fixe, monture guidée),
+     ces motifs fixes du capteur ne se moyennent pas : IMX477 binné,
+     écart Gr/Gb de 1 à 2 % → grille de 2 px (×132 dans le spectre, ×6
+     une fois corrigée), bruit de ligne de période 8 lignes (5,7 → 1,2 ADU) ;
+  2. niveau de noir soustrait (DNG : `BlackLevel` ; caméra : `black_level`
+     des métadonnées `/ws/raw`, tiré de `SensorBlackLevels`), détection
+     des étoiles, appariement avec la référence ; image rejetée si
+     l'alignement échoue ou si moins de 15 % des étoiles sont appariées
+     (scène sans étoiles : faux appariements) ;
+  3. normalisation photométrique (facteur = médiane des rapports de flux
+     des étoiles appariées : poses différentes, voile) puis fond de ciel
+     ramené à celui de la référence, par couleur et localement (carte de
+     fond de la détection, recalée) ;
+  4. poids ∝ (σ_réf / (k·σ))² × min(1, (FWHM_réf / FWHM)²) ;
+  5. **drizzle Bayer** : chaque pixel brut déposé dans son canal à sa
+     position recalée (goutte `pixfrac` = 1) — pas de franges colorées, pas
+     de flou d'interpolation ;
+  6. **rejet σ au fil de l'eau** (Welford par pixel et par canal, après
+     10 images) : κ = 3 au-dessus (satellites, avions, rayons cosmiques),
+     5 en dessous, tolérance de 15 % du signal (turbulence sur les étoiles) ;
+  7. la meilleure (FWHM) des 5 premières images devient la référence.
+
+  Affichage : saturation des couleurs et « Fond neutre » (médianes R, G, B
+  égalisées). ■ Arrêter (ou fin des DNG) relit le stack complet et le garde :
+  étirement, point blanc, saturation, fond neutre et exports PNG/FITS
+  restent actifs ; ▶ Démarrer ou ↺ Reset l'oublient. Case « Alignement étoiles » décochée :
+  même empilement sans recalage (monture guidée) ; grisée pendant
+  l'empilement. Au bureau (scène sans étoiles), laisser l'alignement coché
+  rejette les images : c'est voulu.
+- **Tous capteurs** : menu « Mode capteur » rempli depuis le profil du
+  capteur branché (dimensions réelles livrées, statut `/ws/control` :
+  `raw_modes_info`), ROI limité aux recadrages qui tiennent dans le mode ;
+  les deux sont grisés pendant l'empilement. Niveau de noir : celui que
+  libcamera renvoie (`SensorBlackLevels`, = `rpi.black_level` des fichiers
+  de réglage : 3840 IMX290/327/462, 4096 IMX477, 3200 IMX585/662/678),
+  sinon `black_level` du profil (`sensors.py`). Flux 8 ou 16 bits, RAW10 ou
+  RAW12. Grands modes (IMX477 natif 4056×3040, IMX585/678 3856×2180) :
+  accumulateurs en bandes de lignes selon les limites WebGPU de l'appareil
+  (4 bandes avec les limites par défaut de 128/256 Mo, résultat identique
+  à une bande) ; ~4 s par image en 4056×3040 sur RX 570. Mesuré, 312 DNG M27 sur RX 570 : 312/312 empilées, 60 ms par
+  image (Chrome sans GPU : ~3 s), FWHM du stack 7,07 px (7,23 px avec
+  l'ancien débayérisage + recalage bilinéaire), traînée de satellite et
+  points de pixels chauds/rayons cosmiques supprimés ; ~130 pixels chauds
+  corrigés par image ; GPU = CPU aux décisions de seuil près (42 pixels sur
+  6,2 millions sur 15 images).
 
 ## HTTPS (WebGPU sur téléphone et tablette)
 

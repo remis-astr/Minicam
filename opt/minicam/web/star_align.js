@@ -37,7 +37,7 @@ export const STAR_DEFAULTS = {
     kSigma:     5,       // seuil de détection, en σ de l'image filtrée
     smoothSigma: 1.0,    // gaussienne du filtre adapté (pixels binnés)
     maxStars:   300,     // étoiles rendues (les plus brillantes)
-    maxCandidates: 8192, // capacité du tampon GPU de candidats
+    maxCandidates: 32768, // capacité du tampon GPU de candidats (champ dense en pleine résolution)
 };
 
 const R_PEAK = 3;        // demi-fenêtre 7×7 des pics / mesures
@@ -502,6 +502,7 @@ export class StarDetectorGPU {
      * Détecte les étoiles.
      * @param {object} input
      *   { bayer: Uint16Array }            image Bayer 16 bits (envoyée au GPU)
+     *   { bayerBuffer: GPUBuffer }        image Bayer 16 bits déjà sur le GPU (2 px / u32)
      *   { rgbaBuffer: GPUBuffer }         RGBA float32 déjà sur le GPU
      *   { rgba: Float32Array }            RGBA float32 (envoyée au GPU)
      * @param {number} w  largeur pleine résolution
@@ -513,8 +514,11 @@ export class StarDetectorGPU {
         const timing = {};
         let t = performance.now();
         let srcBuf, lumPipe;
+        const isBayer = !!(input.bayer || input.bayerBuffer);
         if (input.rgbaBuffer) {
             srcBuf = input.rgbaBuffer; lumPipe = this.lumRgba;
+        } else if (input.bayerBuffer) {
+            srcBuf = input.bayerBuffer; lumPipe = this.lumBayer;
         } else {
             const data = input.bayer ?? input.rgba;
             lumPipe = input.bayer ? this.lumBayer : this.lumRgba;
@@ -533,7 +537,7 @@ export class StarDetectorGPU {
             }
             srcBuf = B.src;
         }
-        this._writeParams(B, black, input.bayer ? satLevel : (input.rgbaSat ?? 0), 0);
+        this._writeParams(B, black, isBayer ? satLevel : (input.rgbaSat ?? 0), 0);
 
         // 1. luminance + statistiques de blocs
         let enc = dev.createCommandEncoder();
@@ -551,7 +555,7 @@ export class StarDetectorGPU {
         const { grid, sigma } = backgroundGrid(stats, B.nbx, B.nby);
         const thr = this.opts.kSigma * sigma * smoothNoiseFactor(this.kernel);
         q.writeBuffer(B.bg, 0, grid);
-        this._writeParams(B, black, input.bayer ? satLevel : (input.rgbaSat ?? 0), thr);
+        this._writeParams(B, black, isBayer ? satLevel : (input.rgbaSat ?? 0), thr);
         q.writeBuffer(B.counter, 0, new Uint32Array([0]));
 
         // 2. filtre + 3. pics
@@ -757,7 +761,8 @@ export function matchStars(ref, cur, opts = {}, prior = null) {
         }
         const scale = describeTransform(M).scale;
         if (Math.abs(scale - 1) > o.maxScaleDev) return null;
-        return { ok: true, M, inliers: pairs.length, rms: Math.sqrt(s2 / pairs.length), method, scale };
+        return { ok: true, M, inliers: pairs.length, rms: Math.sqrt(s2 / pairs.length), method, scale,
+                 pairs: pairs.map((p) => [p.i, p.j]) };   // [indice cur, indice ref]
     };
 
     // Chemin rapide : la transformée précédente tient encore
