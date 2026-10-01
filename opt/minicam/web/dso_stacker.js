@@ -534,19 +534,61 @@ function demosaicBlend(acc, w, h, cmap, wTyp) {
     return out;
 }
 
+/**
+ * Rendu pour des plans déjà débayérisés (RGB) ou mono : chaque canal est
+ * échantillonné partout, valeur = somme / poids ; un pixel jamais couvert
+ * (bord) prend la moyenne pondérée de ses voisins. Mono : G recopié en R, B.
+ */
+function planesBlend(acc, w, h, mono) {
+    const n = w * h, out = new Float32Array(n * 4);
+    const chans = mono ? [1] : [0, 1, 2];
+    let wMax = 0;
+    for (let p = 0; p < n; p += 97) wMax = Math.max(wMax, acc[6 * p + 4]);
+    for (let p = 0; p < n; p++) {
+        for (const c of chans) {
+            const wc = acc[6 * p + 3 + c];
+            let v;
+            if (wc > 0) v = acc[6 * p + c] / wc;
+            else {
+                const x = p % w, y = (p / w) | 0;
+                let a = 0, b = 0;
+                for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+                    const xx = x + dx, yy = y + dy;
+                    if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                    const q = yy * w + xx;
+                    a += acc[6 * q + c]; b += acc[6 * q + 3 + c];
+                }
+                v = b > 0 ? a / b : 0;
+            }
+            if (mono) out[4 * p] = out[4 * p + 1] = out[4 * p + 2] = v;
+            else out[4 * p + c] = v;
+        }
+        out[4 * p + 3] = wMax > 0 ? Math.min(1, acc[6 * p + 4] / wMax) : 0;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 
 export class DsoStacker {
     /**
      * @param {object} o
      * @param {number} o.width  @param {number} o.height  @param {string} o.bayer  ('RGGB'…)
+     * @param {string} [o.layout]  'bayer' (défaut) | 'rgb' (3 plans déjà débayérisés) | 'mono'
      * @param {GPUDevice} [o.device]  sinon demandé à navigator.gpu ; échec → CPU
      * @param {boolean} [o.forceCpu]
      */
-    static async create({ width, height, bayer = 'RGGB', device, forceCpu = false, ...opts }) {
-        if (width % 2 || height % 2) throw new Error(`dimensions Bayer impaires (${width}×${height})`);
+    static async create({ width, height, bayer = 'RGGB', layout = 'bayer', device, forceCpu = false, ...opts }) {
+        if (layout === 'bayer' && (width % 2 || height % 2))
+            throw new Error(`dimensions Bayer impaires (${width}×${height})`);
         const s = new DsoStacker();
-        s.w = width; s.h = height; s.bayer = bayer; s.cmap = bayerCode(bayer);
+        s.w = width; s.h = height; s.bayer = bayer; s.layout = layout;
+        s.cmap = bayerCode(bayer);
+        // plans d'entrée : un plan Bayer, ou des plans déjà débayérisés dont
+        // chaque pixel porte une seule couleur (table de couleurs constante)
+        s.planes = layout === 'rgb' ? [0, 1, 2].map((c) => c * 0x55)
+                 : layout === 'mono' ? [0x55]
+                 : [s.cmap];
         s.opts = { ...DSO_DEFAULTS, ...opts };
         s.gpu = null;
         if (!forceCpu) {
@@ -573,7 +615,8 @@ export class DsoStacker {
             s.st = new Float32Array(9 * n);
         }
         s._resetState();
-        console.log(`[DSO] drizzle Bayer ${bayer} ${width}×${height} sur ${s.gpu ? 'GPU' : 'CPU'}, modèle ${s.opts.model}`);
+        console.log(`[DSO] ${layout === 'bayer' ? `drizzle Bayer ${bayer}` : `${layout} (${s.planes.length} plan(s))`} `
+                    + `${width}×${height} sur ${s.gpu ? 'GPU' : 'CPU'}, modèle ${s.opts.model}`);
         return s;
     }
 
@@ -596,7 +639,7 @@ export class DsoStacker {
             hot: await makePipeline(device, HOT_WGSL, 'dso-hot'),
             geq: await makePipeline(device, GEQ_WGSL, 'dso-geq'),
             gp: device.createBuffer({ size: 32, usage: U.UNIFORM | U.COPY_DST }),
-            eq: device.createBuffer({ size: n * 2, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC }),
+            eqs: this.planes.map(() => device.createBuffer({ size: n * 2, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC })),
             drizzle: await makePipeline(device, DRIZZLE_WGSL, 'dso-drizzle'),
             hp: device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST }),
             dp: device.createBuffer({ size: 144, usage: U.UNIFORM | U.COPY_DST }),
@@ -689,89 +732,110 @@ export class DsoStacker {
     }
 
     /** Médianes du fond par couleur (brut − noir, unités 0–1), sur un échantillon. */
-    _skyMedians(raw, black) {
-        const { w, h, cmap } = this;
+    _skyMedians(planes, black) {
+        const { w, h } = this, n = w * h;
         const vals = [[], [], []];
         const step = 7;   // impair : parcourt toutes les positions Bayer
-        for (let i = 0; i < w * h; i += step) {
-            const x = i % w, y = (i / w) | 0;
-            vals[colorAt(cmap, x, y)].push(raw[i]);
-        }
-        return vals.map((v) => (median(v) - black) * INV16);
+        planes.forEach((pl, k) => {
+            const cmap = this.planes[k];
+            for (let i = 0; i < n; i += step) vals[colorAt(cmap, i % w, (i / w) | 0)].push(pl[i]);
+        });
+        const m = vals.map((v) => v.length ? (median(v) - black) * INV16 : null);
+        const any = m.find((v) => v != null) ?? 0;
+        return m.map((v) => v ?? any);   // mono : même fond pour les trois canaux
+    }
+
+    /** Image de détection : le plan Bayer, ou la luminance des plans débayérisés. */
+    _detectionPlane(planes) {
+        if (this.layout !== 'rgb') return planes[0];
+        const [r, g, b] = planes, out = new Uint16Array(r.length);
+        for (let i = 0; i < r.length; i++) out[i] = (r[i] + 2 * g[i] + b[i] + 2) >> 2;
+        return out;
     }
 
     /**
-     * Ajoute une image Bayer. @param {Uint16Array} raw  w×h, 16 bits
-     * @param {object} [o] { black (ADU 16 bits), weight }
+     * Ajoute une image. @param {Uint16Array} data  16 bits : w×h (Bayer, mono)
+     *   ou 3 plans w×h consécutifs R, G, B (layout 'rgb')
+     * @param {object} [o] { black (ADU 16 bits) }
      * @returns compte rendu { accepted, reason?, stars, inliers, rms, dx, dy, rotationDeg, fwhm,
-     *   elong, scale, weight, hotPixels, clipped, timing }
+     *   elong, scale, weight, hotPixels, clipped, greenFixed, banding, timing }
      */
-    async addFrame(raw, { black = 0, _replay = false } = {}) {
-        const { w, h } = this, o = this.opts;
-        if (raw.length !== w * h) throw new Error(`image ${raw.length} px ≠ ${w * h} px du stack`);
+    async addFrame(data, { black = 0, _replay = false } = {}) {
+        const { w, h } = this, o = this.opts, n = w * h, np = this.planes.length;
+        if (data.length !== n * np) throw new Error(`image ${data.length} valeurs ≠ ${n * np} attendues (${w}×${h}×${np})`);
         const timing = {};
         let t = performance.now();
         const g = this.gpu;
-        // 0. bruit de ligne (CPU, avant envoi au GPU)
+        const isBayer = this.layout === 'bayer';
+
+        // 0. bruit de ligne, plan par plan (CPU, avant envoi au GPU)
         let banding = 0;
-        if (o.rowBanding) {
-            const r = rowBandingCPU(raw, w, h);
-            raw = r.fixed; banding = r.maxOff;
+        const planes = [];
+        for (let k = 0; k < np; k++) {
+            let pl = data.subarray(k * n, (k + 1) * n);
+            if (o.rowBanding) {
+                const r = rowBandingCPU(pl, w, h);
+                pl = r.fixed; banding = Math.max(banding, r.maxOff);
+            }
+            planes.push(pl);
         }
         timing.banding = performance.now() - t; t = performance.now();
+        const detPlane = this._detectionPlane(planes);
 
-        // 1. pixels chauds (le bruit brut vient de l'image précédente, ou
-        // d'une détection préalable pour la première)
-        let fixedCpu = raw, hotPixels = 0;
-        if (g) {
-            g.device.queue.writeBuffer(g.raw, 0, raw);
-            g.device.queue.writeBuffer(g.counter, 0, new Uint32Array(4));   // [chauds, rejets σ]
-        }
-        if (o.hotPixels) {
-            if (this.sigmaRaw == null) this.sigmaRaw = Math.max((await this._detect(raw, black)).sigma, 2) / 2;
-            const thr = o.hotK * this.sigmaRaw;
+        // 1. pixels chauds (bruit brut de l'image précédente, ou d'une
+        // détection préalable pour la première), puis verts (Bayer seulement)
+        let hotPixels = 0, greenFixed = 0;
+        if (g) g.device.queue.writeBuffer(g.counter, 0, new Uint32Array(4));   // [chauds, rejets σ, verts]
+        if (o.hotPixels && this.sigmaRaw == null)
+            this.sigmaRaw = Math.max((await this._detect(detPlane, black)).sigma, 2) / 2;
+        const thr = o.hotK * (this.sigmaRaw ?? 0);
+        const geqOn = isBayer && o.greenBalance && this.sigmaRaw != null;
+        const geqThr = 4 * (this.sigmaRaw ?? 0);
+        const cpuPlanes = [];
+        for (let k = 0; k < np; k++) {
+            const pl = planes[k];
             if (g) {
-                const hp = new ArrayBuffer(16);
-                new Uint32Array(hp, 0, 2).set([w, h]);
-                new Float32Array(hp, 8, 1)[0] = thr;
-                g.device.queue.writeBuffer(g.hp, 0, hp);
-                const enc = this._dispatch(g.hot, this._bind(g.hot, [g.hp, g.raw, g.fixed, g.counter]),
-                                           Math.ceil(w / 32), Math.ceil(h / 16));
-                g.device.queue.submit([enc.finish()]);
-            } else {
-                const r = hotPixelsCPU(raw, w, h, thr);
-                fixedCpu = r.fixed; hotPixels = r.count;
-            }
-        } else if (g) {
-            const enc = g.device.createCommandEncoder();
-            enc.copyBufferToBuffer(g.raw, 0, g.fixed, 0, w * h * 2);
-            g.device.queue.submit([enc.finish()]);
-        }
-        // égalisation locale des deux verts (après les pixels chauds)
-        let eqCpu = fixedCpu, greenFixed = 0;
-        const geqThr = 4 * (this.sigmaRaw ?? 0), geqOn = o.greenBalance && this.sigmaRaw != null;
-        if (g) {
-            if (geqOn) {
-                const gp = new ArrayBuffer(32);
-                new Uint32Array(gp, 0, 3).set([w, h, this.cmap]);
-                new Float32Array(gp, 16, 3).set([geqThr, o.greenRel, black]);
-                g.device.queue.writeBuffer(g.gp, 0, gp);
-                const enc = this._dispatch(g.geq, this._bind(g.geq, [g.gp, g.fixed, g.eq, g.counter]),
-                                           Math.ceil(w / 32), Math.ceil(h / 16));
-                g.device.queue.submit([enc.finish()]);
-            } else {
+                g.device.queue.writeBuffer(g.raw, 0, pl);
                 const enc = g.device.createCommandEncoder();
-                enc.copyBufferToBuffer(g.fixed, 0, g.eq, 0, w * h * 2);
+                if (o.hotPixels) {
+                    const hp = new ArrayBuffer(16);
+                    new Uint32Array(hp, 0, 2).set([w, h]);
+                    new Float32Array(hp, 8, 1)[0] = thr;
+                    g.device.queue.writeBuffer(g.hp, 0, hp);
+                    const pass = enc.beginComputePass();
+                    pass.setPipeline(g.hot); pass.setBindGroup(0, this._bind(g.hot, [g.hp, g.raw, g.fixed, g.counter]));
+                    pass.dispatchWorkgroups(Math.ceil(w / 32), Math.ceil(h / 16)); pass.end();
+                } else {
+                    enc.copyBufferToBuffer(g.raw, 0, g.fixed, 0, n * 2);
+                }
+                if (geqOn) {
+                    const gp = new ArrayBuffer(32);
+                    new Uint32Array(gp, 0, 3).set([w, h, this.planes[k]]);
+                    new Float32Array(gp, 16, 3).set([geqThr, o.greenRel, black]);
+                    g.device.queue.writeBuffer(g.gp, 0, gp);
+                    const pass = enc.beginComputePass();
+                    pass.setPipeline(g.geq); pass.setBindGroup(0, this._bind(g.geq, [g.gp, g.fixed, g.eqs[k], g.counter]));
+                    pass.dispatchWorkgroups(Math.ceil(w / 32), Math.ceil(h / 16)); pass.end();
+                } else {
+                    enc.copyBufferToBuffer(g.fixed, 0, g.eqs[k], 0, n * 2);
+                }
                 g.device.queue.submit([enc.finish()]);
+            } else {
+                let cur = pl;
+                if (o.hotPixels) { const r = hotPixelsCPU(cur, w, h, thr); cur = r.fixed; hotPixels += r.count; }
+                if (geqOn) {
+                    const r = greenEqCPU(cur, w, h, this.planes[k], geqThr, o.greenRel, black);
+                    cur = r.fixed; greenFixed += r.count;
+                }
+                cpuPlanes.push(cur);
             }
-        } else if (geqOn) {
-            const r = greenEqCPU(fixedCpu, w, h, this.cmap, geqThr, o.greenRel, black);
-            eqCpu = r.fixed; greenFixed = r.count;
         }
         timing.hot = performance.now() - t; t = performance.now();
 
-        // 2. étoiles
-        const det = await this._detect(eqCpu, black, g ? g.eq : null);
+        // 2. étoiles (brut Bayer corrigé, ou luminance des plans)
+        const det = isBayer
+            ? await this._detect(g ? null : cpuPlanes[0], black, g ? g.eqs[0] : null)
+            : await this._detect(g ? detPlane : this._detectionPlane(cpuPlanes), black);
         const stars = det.stars;
         // plancher : une image sans bruit mesurable (zone uniforme, image
         // synthétique) donnerait un σ nul, donc un poids 0/0 et un seuil nul
@@ -779,7 +843,7 @@ export class DsoStacker {
         this.sigmaRaw = sigma / 2;
         const fwhm = median(stars.filter((s) => !s.sat).map((s) => s.fwhm));
         const elong = median(stars.filter((s) => !s.sat).map((s) => s.elong));
-        const bg = this._skyMedians(raw, black);
+        const bg = this._skyMedians(planes, black);
         timing.detect = performance.now() - t; t = performance.now();
 
         const report = { stars: stars.length, fwhm, elong, background: bg, timing };
@@ -835,7 +899,7 @@ export class DsoStacker {
         let clipped = 0;
         if (g) {
             const buf = new ArrayBuffer(144), u = new Uint32Array(buf), f = new Float32Array(buf);
-            u[0] = w; u[1] = h; u[2] = this.cmap; u[3] = P.nmin;
+            u[0] = w; u[1] = h; u[3] = P.nmin;
             f.set(M, 4); f.set(P.Mi, 10);
             f[16] = black; f[17] = k; f[18] = P.pf; f[19] = P.kappa;
             f[20] = weight; f.set(P.bg, 21); f[24] = P.clip ? 1 : 0; f[25] = P.kappaLow;
@@ -849,20 +913,24 @@ export class DsoStacker {
             }
             g.device.queue.writeBuffer(g.gCur, 0, P.gCur);
             g.device.queue.writeBuffer(g.gRef, 0, P.gRef);
-            // une passe par bande (paramètres écrits avant chaque envoi : la
-            // file les applique dans l'ordre)
-            for (const b of g.bands) {
-                u[33] = b.y0; u[34] = b.rows;
-                g.device.queue.writeBuffer(g.dp, 0, buf);
-                const enc = this._dispatch(g.drizzle, this._bind(g.drizzle,
-                                           [g.dp, g.eq, b.acc, b.st, g.counter, g.gCur, g.gRef]),
-                                           Math.ceil(w / 16), Math.ceil(b.rows / 16));
-                g.device.queue.submit([enc.finish()]);
+            // une passe par plan et par bande (paramètres écrits avant chaque
+            // envoi : la file les applique dans l'ordre)
+            for (let pk = 0; pk < np; pk++) {
+                u[2] = this.planes[pk];
+                for (const b of g.bands) {
+                    u[33] = b.y0; u[34] = b.rows;
+                    g.device.queue.writeBuffer(g.dp, 0, buf);
+                    const enc = this._dispatch(g.drizzle, this._bind(g.drizzle,
+                                               [g.dp, g.eqs[pk], b.acc, b.st, g.counter, g.gCur, g.gRef]),
+                                               Math.ceil(w / 16), Math.ceil(b.rows / 16));
+                    g.device.queue.submit([enc.finish()]);
+                }
             }
             const c = await this._readCounters();
             hotPixels = c[0]; clipped = c[1]; greenFixed = c[2];
         } else {
-            clipped = drizzleCPU(eqCpu, w, h, P, this.acc, this.st);
+            for (let pk = 0; pk < np; pk++)
+                clipped += drizzleCPU(cpuPlanes[pk], w, h, { ...P, cmap: this.planes[pk] }, this.acc, this.st);
         }
         timing.drizzle = performance.now() - t;
         this.count++;
@@ -870,7 +938,7 @@ export class DsoStacker {
 
         // 7. choix de la référence parmi les premières images
         if (!_replay && !this.refLocked) {
-            this.candidates.push({ raw: raw.slice(), black, fwhm, stars: stars.length });
+            this.candidates.push({ raw: data.slice(), black, fwhm, stars: stars.length });
             if (this.candidates.length >= o.refCandidates) await this._chooseReference(report);
         }
         return report;
@@ -925,14 +993,16 @@ export class DsoStacker {
             for (let i = 0; i < n; i += 97) if (acc[6 * i + 3 + c] > 0) v.push(acc[6 * i + 3 + c]);
             return median(v) || 1;
         });
-        const out = demosaicBlend(acc, w, h, this.cmap, wTyp);
+        const out = this.layout === 'bayer' ? demosaicBlend(acc, w, h, this.cmap, wTyp)
+                                            : planesBlend(acc, w, h, this.layout === 'mono');
         return { data: out, width: w, height: h, count: this.count };
     }
 
     destroy() {
         if (this.gpu) {
-            for (const k of ['hp', 'dp', 'gp', 'raw', 'fixed', 'eq', 'counter', 'rbCounter', 'rbAcc', 'gCur', 'gRef'])
+            for (const k of ['hp', 'dp', 'gp', 'raw', 'fixed', 'counter', 'rbCounter', 'rbAcc', 'gCur', 'gRef'])
                 this.gpu[k]?.destroy();
+            for (const b of this.gpu.eqs) b.destroy();
             for (const b of this.gpu.bands) { b.acc.destroy(); b.st.destroy(); }
             this.gpu.detector.destroyBuffers();
             this.gpu = null;

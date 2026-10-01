@@ -126,8 +126,20 @@ def cv2_bayer_code(pattern: str) -> int:
         raise ValueError(f"pattern bayer non supporté: {pattern!r}") from None
 
 
-def _write_fits(data: np.ndarray, meta: dict | None = None, instrument: str = "IMX327", bayer_pattern: str = "RGGB") -> bytes:
-    """Write a minimal FITS file for a 2D uint16 Bayer array (BITPIX=16, BZERO=32768)."""
+def fits_black_level(meta: dict | None, bits: int, profile=None) -> int | None:
+    """Niveau de noir en unités des données FITS (valeurs brutes non décalées,
+    `bits` bits) : SensorBlackLevels de libcamera (échelle 16 bits), sinon le
+    niveau du profil du capteur ; None si inconnu."""
+    levels = (meta or {}).get("SensorBlackLevels")
+    black16 = sum(levels) / len(levels) if levels else getattr(profile, "black_level", 0)
+    return round(black16 / 2 ** (16 - bits)) if black16 else None
+
+
+def _write_fits(data: np.ndarray, meta: dict | None = None, instrument: str = "IMX327", bayer_pattern: str = "RGGB",
+                black_level: int | None = None, bit_depth: int | None = None) -> bytes:
+    """Write a minimal FITS file for a 2D uint16 Bayer array (BITPIX=16, BZERO=32768).
+    `black_level` (unités des données) → BLKLEVEL ; `bit_depth` (bits du
+    convertisseur, données non décalées) → BITDEPTH ; lus par Live Stack."""
     H, W = data.shape
     exp_s = (meta.get("ExposureTime", 0) / 1e6) if meta else 0.0
     gain = meta.get("AnalogueGain", 0.0) if meta else 0.0
@@ -149,6 +161,8 @@ def _write_fits(data: np.ndarray, meta: dict | None = None, instrument: str = "I
         f"EXPTIME = {exp_s:>20.6f}",
         f"GAIN    = {gain:>20.4f}",
         f"INSTRUME= '{instrument.upper():<8}'",
+        *([f"BLKLEVEL= {black_level:>20d} / [ADU] black level, data units"] if black_level is not None else []),
+        *([f"BITDEPTH= {bit_depth:>20d} / sensor ADC bits, data not shifted"] if bit_depth is not None else []),
         "END     ",
     ]
     hdr = b"".join(c.ljust(80).encode("ascii") for c in cards)
@@ -182,7 +196,9 @@ async def capture_fits(request: Request) -> Response:
     camera = request.app.state.camera
     raw, meta = await asyncio.get_event_loop().run_in_executor(None, camera.capture_raw)
     data = unpack_raw(raw, camera.raw_bits, camera.raw_size[0])
-    fits_bytes = _write_fits(data, meta, instrument=camera.sensor, bayer_pattern=camera.bayer_pattern)
+    fits_bytes = _write_fits(data, meta, instrument=camera.sensor, bayer_pattern=camera.bayer_pattern,
+                             black_level=fits_black_level(meta, camera.raw_bits, camera.profile),
+                             bit_depth=camera.raw_bits)
     filename = f"minicam_{_ts()}.fits"
     PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
     (PHOTOS_DIR / filename).write_bytes(fits_bytes)

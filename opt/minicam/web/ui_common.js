@@ -4,6 +4,50 @@
 // GPU detection
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Modes capteur et ROI — mêmes libellés et mêmes règles sur toutes les pages
+// (statut /ws/control : raw_modes_info = dimensions livrées de chaque mode)
+// ---------------------------------------------------------------------------
+
+/** Libellé d'un mode : « nom — L×H (binning) ». */
+export function modeLabel(m) {
+    return `${m.name} — ${m.width}×${m.height}${m.binned ? ' (binning)' : ''}`;
+}
+
+/** Remplit un <select> de modes ; garde la sélection courante du capteur. */
+export function fillModeSelect(el, info, current) {
+    el.innerHTML = '';
+    for (const m of info) el.add(new Option(modeLabel(m), m.name));
+    if (current) el.value = current;
+}
+
+/** Recadrages centrés proposés : ciel profond (Live) et planétaire (Lucky). */
+export const ROI_CHOICES = {
+    live:  [[1920, 1080], [1280, 720], [1024, 768], [800, 600], [640, 480], [512, 512]],
+    lucky: [[1280, 720], [800, 600], [640, 480], [512, 512], [400, 400], [320, 240], [256, 256]],
+};
+
+/**
+ * Remplit un <select> de ROI pour un mode de w×h : « Plein champ (w×h) »
+ * puis les recadrages qui tiennent dans le mode ; garde le choix précédent
+ * s'il est encore possible.
+ */
+export function fillRoiSelect(el, w, h, choices) {
+    const prev = el.value;
+    el.innerHTML = '';
+    el.add(new Option(`Plein champ (${w}×${h})`, 'full'));
+    for (const [rw, rh] of choices)
+        if (rw <= w && rh <= h && (rw < w || rh < h)) el.add(new Option(`${rw}×${rh}`, `${rw}x${rh}`));
+    el.value = [...el.options].some((o) => o.value === prev) ? prev : 'full';
+}
+
+/** « 640x480 » → [640, 480] ; « full » → null. */
+export function parseRoi(val) {
+    if (!val || val === 'full') return null;
+    const [w, h] = val.split('x').map(Number);
+    return [w, h];
+}
+
 /** URL WebSocket du Pi : wss:// sur une page HTTPS (sinon bloqué), ws:// sinon. */
 export function wsUrl(path) {
     return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;

@@ -14,7 +14,7 @@ import numpy as np
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from minicam.api.routes_capture import _write_fits, cv2_bayer_code, unpack_raw
+from minicam.api.routes_capture import _write_fits, cv2_bayer_code, fits_black_level, unpack_raw
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -246,7 +246,8 @@ def _save_frame_sync(data: Any, idx: int, mode: str, session_dir: Path, app: Any
             bits = camera.raw_bits
             unpacked = unpack_raw(raw, bits, camera.raw_size[0])
             bayer_pattern = camera.bayer_pattern
-            fits_bytes = _write_fits(unpacked, meta, instrument=camera.sensor, bayer_pattern=bayer_pattern)
+            fits_bytes = _write_fits(unpacked, meta, instrument=camera.sensor, bayer_pattern=bayer_pattern,
+                                     black_level=fits_black_level(meta, bits, camera.profile), bit_depth=bits)
             (session_dir / f"{idx:08d}.fits").write_bytes(fits_bytes)
             scaled = np.clip(unpacked >> (bits - 8), 0, 255).astype(np.uint8)
             h, w = scaled.shape

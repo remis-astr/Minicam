@@ -80,12 +80,29 @@ Le dépôt suit l'arborescence du Pi :
   Wi-Fi ; en USB le lien n'est plus le frein et zstd ralentit un peu.
   Une seule capture RAW à la fois (verrou serveur) : deux flux simultanés
   ont figé la caméra (« Camera frontend has timed out »).
+- **Sélection des images** (menu « Sélection », choix gardé par le
+  navigateur) : *Fenêtre glissante* (défaut, comportement historique) —
+  chaque image est comparée aux 50 dernières et empilée si elle est parmi
+  les X % meilleures, sans jamais être retirée ; *Pool élite* — le stack
+  contient toujours les N images les plus nettes de toute la session : une
+  meilleure image remplace la pire, retirée exactement du stack (image
+  d'origine gardée en mémoire, réanalysée et recalée avec un poids −1).
+  Les curseurs « Meilleures frames (%) » / « Taille du pool (images) »
+  s'affichent selon le choix ; mémoire estimée (ROI, profondeur ou SER) et
+  plafonnée à ~¼ de la mémoire de l'appareil (1,5 Go max). Mesuré, SER
+  Jupiter 832 images : pool de 83 = exactement les 83 meilleures de la
+  session, netteté +10 % par rapport à la fenêtre glissante à 10 % (104
+  images), 23 s contre 15 s ; retrait vérifié exact (même stack qu'un
+  empilement direct des images restées, écart ≤ 0,0001 %).
 - **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
   n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
 - **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel
   profond), contraste (courbe en S) ; ondelettes à trous (4 couches +
   débruitage) et CLAHE appliqués **à la fin** du stack (SER terminé ou
-  ■ Arrêter), qui garde l'image et laisse tous les réglages actifs. PNG =
+  ■ Arrêter), qui garde l'image et laisse tous les réglages actifs — ou
+  pendant l'empilement avec la case « Accentuation en direct » (choix gardé
+  par le navigateur ; calcul sur le processeur, pas sur WebGPU : ~0,1–0,3 s
+  par aperçu en 640×480, jusqu'à ~2,5 s en 2028×1080 plein champ). PNG =
   image traitée, FITS = stack brut. CLAHE : facteur borné pour qu'aucun
   canal ne dépasse 255 (sinon la couleur vire au blanc). **Saturation**
   (0–300 %, 100 % = inchangée, en direct) : écarte les canaux de la
@@ -114,6 +131,24 @@ Le dépôt suit l'arborescence du Pi :
   envoyé au Pi (`web/dng_file_source.js`). Niveau de noir, niveau blanc et
   pose lus dans le fichier (l'IFD Exif de rpicam est en fin de fichier). Un
   fichier à l'en-tête abîmé est ignoré.
+- **Test FITS** (`web/fits_file_source.js`, même champ « Fichiers » que les
+  DNG ; une série d'un seul type) : HDU principal, BITPIX 8/16/32/−32/−64,
+  BZERO/BSCALE ; brut Bayer (`BAYERPAT`, décalé par `XBAYROFF`/`YBAYROFF`),
+  mono, ou RGB débayérisé (3 plans, ex. conversion Siril) — le moteur traite
+  alors chaque plan (bruit de ligne, pixels chauds, drizzle, rejet σ ; pas
+  d'égalisation des verts) et détecte les étoiles sur la luminance. Lignes
+  prises dans l'ordre du fichier. Profondeur : `BITDEPTH`, sinon la plus
+  grande plausible d'après le maximum du 1er fichier (12 bits ≤ 4095, 14 bits
+  ≤ 16383, sinon 16 ; surestimer n'écrête pas). Noir : `BLKLEVEL` ou
+  `PEDESTAL`, sinon valeur du capteur `INSTRUME` (16 bits décalés, 12 ou
+  10 bits natifs : la plus grande ≤ 1,3 × 0,5e centile du fond). L'export
+  FITS de la Multicam écrit désormais `BLKLEVEL` et `BITDEPTH` (fichiers
+  autonomes). Mesuré sur M31 (IMX477 4056×2160, 25 s) : 30 FITS Bayer de
+  la Multicam et 20 FITS RGB Siril empilés, résidu 0,2 px, ~1 s/image
+  (Bayer), ~2,8 s/image (RGB, 3 plans) sur RX 570. Un obstacle présent dans
+  les images (câble électrique…) reste dans le stack : le rejet σ, tolérant
+  vers le bas (κ = 5) et actif après 10 images, ne retire que ce qui ne
+  revient pas d'une image à l'autre.
 - **Détection d'étoiles et alignement** (`web/star_align.js`) : luminance binnée 2×2, fond par blocs (moyenne
   à rejet σ + médiane 3×3), filtre gaussien, maxima locaux à 5σ, centroïde
   sub-pixel, FWHM, allongement, saturation — sur GPU (WebGPU), avec une
@@ -163,7 +198,10 @@ Le dépôt suit l'arborescence du Pi :
 - **Tous capteurs** : menu « Mode capteur » rempli depuis le profil du
   capteur branché (dimensions réelles livrées, statut `/ws/control` :
   `raw_modes_info`), ROI limité aux recadrages qui tiennent dans le mode ;
-  les deux sont grisés pendant l'empilement. Niveau de noir : celui que
+  les deux sont grisés pendant l'empilement. Mêmes libellés (« nom — L×H
+  (binning) ») et mêmes règles sur la page principale, Lucky Stack
+  (recadrages planétaires jusqu'à 256×256) et Live Stack (jusqu'à
+  512×512) — fonctions communes de `web/ui_common.js`. Niveau de noir : celui que
   libcamera renvoie (`SensorBlackLevels`, = `rpi.black_level` des fichiers
   de réglage : 3840 IMX290/327/462, 4096 IMX477, 3200 IMX585/662/678),
   sinon `black_level` du profil (`sensors.py`). Flux 8 ou 16 bits, RAW10 ou
@@ -365,7 +403,8 @@ usermod -aG sudo,video,render,gpio,i2c,spi,netdev,plugdev,dialout,input,audio ad
 echo "admin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/010_admin-nopasswd
 chmod 440 /etc/sudoers.d/010_admin-nopasswd
 # l'API appelle sudo (nmcli, tee config.txt, systemctl reboot)
-mkdir -p /timelapse /var/lib/minicam && chown admin:admin /timelapse /var/lib/minicam
+mkdir -p /timelapse /photos /var/lib/minicam && chown admin:admin /timelapse /photos /var/lib/minicam
+# /photos : photos et FITS de capture (sans lui, /capture.fits répond 500)
 chown -R admin:admin /opt/minicam
 # clé SSH publique du PC -> /home/admin/.ssh/authorized_keys
 # (700 / 600, propriétaire admin). admin n'a pas de mot de passe : `passwd admin` si besoin.

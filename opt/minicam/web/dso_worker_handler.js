@@ -4,7 +4,8 @@
  * webgpu_stacking_worker.js et cpu_stacking_worker.js — voir dso_stacker.js.
  *
  *   init-stacking { starAlign: {…options}, width, height, bayer } → init-stacking-done
- *   stack-frame-stars { requestId, raw (Uint16Array Bayer), black }  → stack-stars-done { requestId, report }
+ *   stack-frame-stars { requestId, raw (Uint16Array : Bayer, mono ou 3 plans RGB), black }
+ *                                                             → stack-stars-done { requestId, report }
  *   get-stack-snapshot (mode étoiles actif)                  → stack-snapshot-complete
  *   cleanup                                                  → libère, puis traitement habituel
  *
@@ -23,7 +24,7 @@ export async function handleDsoMessage(data, { forceCpu = false } = {}) {
             dso?.destroy();
             dso = null;
             dso = await DsoStacker.create({ width: data.width, height: data.height, bayer: data.bayer,
-                                           forceCpu, ...data.starAlign });
+                                           layout: data.layout ?? 'bayer', forceCpu, ...data.starAlign });
             self.postMessage({ type: 'init-stacking-done', outWidth: data.width, outHeight: data.height,
                                backend: dso.backend });
         } catch (err) {

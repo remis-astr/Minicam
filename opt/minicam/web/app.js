@@ -84,7 +84,14 @@ function connect() {
         elExpoInput.value = parseFloat(msg.exposure_ms).toFixed(1);
         elExpoInput.classList.remove('input-error');
       }
-      if (msg.raw_modes && elResSelect.options.length === 0) {
+      if (msg.raw_modes_info) {
+        // libellés « nom — L×H (binning) », comme Lucky/Live Stack
+        msg.raw_modes_info.forEach((m, i) => {
+          const label = `${m.name} — ${m.width}×${m.height}${m.binned ? ' (binning)' : ''}`;
+          if (elResSelect.options[i]?.value === m.name) elResSelect.options[i].textContent = label;
+          else if (elResSelect.options.length === i) elResSelect.add(new Option(label, m.name));
+        });
+      } else if (msg.raw_modes && elResSelect.options.length === 0) {
         msg.raw_modes.forEach(r => {
           const o = document.createElement('option');
           o.value = o.textContent = r;

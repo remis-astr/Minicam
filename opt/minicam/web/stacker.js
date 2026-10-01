@@ -370,6 +370,13 @@ export class StreamingStacker extends EventTarget {
         this._canvas = canvas;
 
         this._qualityThreshold = options.qualityThreshold ?? 0.10;
+        // Sélection (Lucky) : 'window' = X % meilleures d'une fenêtre glissante
+        // de 50 images (historique) ; 'elite' = pool des N meilleures images de
+        // toute la session, la pire remplacée (retirée exactement du stack).
+        this._selection        = options.selection ?? 'window';
+        this._poolSize         = Math.max(1, options.poolSize ?? 200);
+        this._pool             = [];
+        this._poolReplaced     = 0;
         this._alignMode        = options.alignMode ?? (mode === 'lucky' ? 'on' : 'on');
         this._searchRadius     = options.searchRadius ?? 32;
         this._targetFps        = options.fps ?? null;
@@ -401,10 +408,13 @@ export class StreamingStacker extends EventTarget {
         this._bgNeutral        = options.bgNeutral ?? false;
         // Mode alignMode 'stars' (ciel profond) : options de dso_stacker.js
         this._starAlign        = options.starAlign ?? {};
-        // Ondelettes + CLAHE : coûteux, appliqués seulement une fois le stack
-        // terminé (setPostProcessing(true)) — pendant l'empilement, l'aperçu
-        // n'a que l'étirement et le contraste (LUT, quasi gratuits).
-        this._postActive       = false;
+        // Ondelettes + CLAHE (CPU, ~0,1–0,3 s par aperçu) : par défaut
+        // appliqués seulement une fois le stack terminé (setPostProcessing) —
+        // pendant l'empilement, l'aperçu n'a que l'étirement et le contraste
+        // (LUT, quasi gratuits). postLive : aussi pendant l'empilement.
+        this._postLive         = options.postLive ?? false;
+        this._postActive       = this._postLive;
+        this._finished         = false;
         this._lastSnap         = null;   // dernier snapshot du stack, re-rendu sans le GPU
         this._renderPending    = false;
 
@@ -514,7 +524,10 @@ export class StreamingStacker extends EventTarget {
         this._sharpnessBuffer = [];
         this._lastSharpness   = 0;
         this._lastSnap        = null;
-        this._postActive      = false;
+        this._finished        = false;
+        this._pool            = [];
+        this._poolReplaced    = 0;
+        this._postActive      = this._postLive;
         if (this._stackWorker) this._stackWorker.postMessage({ type: 'cleanup' });
         if (this._canvas) {
             const ctx = this._canvas.getContext('2d');
@@ -551,6 +564,12 @@ export class StreamingStacker extends EventTarget {
     /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
     setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
 
+    /** Ondelettes + CLAHE aussi pendant l'empilement (sinon seulement à la fin). */
+    setPostLive(on) {
+        this._postLive = on;
+        this.setPostProcessing(on || this._finished);
+    }
+
     /**
      * Fin du stack (SER terminé, bouton Arrêter) : relit le stack complet
      * (l'aperçu est limité dans le temps pendant l'empilement, les dernières
@@ -560,6 +579,7 @@ export class StreamingStacker extends EventTarget {
     async finish() {
         await this._inflight;   // image en cours (ses erreurs sont déjà signalées)
         if (this._stackWorker && this._initialized) await this._updatePreview();
+        this._finished = true;
         this.setPostProcessing(true);
         console.log('[Stacker] ' + this.timingSummary());
     }
@@ -696,15 +716,18 @@ export class StreamingStacker extends EventTarget {
         // (pixels chauds, étoiles, drizzle Bayer — dso_stacker.js), sans
         // débayérisage ni score de netteté.
         if (this._alignMode === 'stars') {
-            if (format !== 'raw') throw new Error(`alignement étoiles : format RAW requis (reçu ${format})`);
+            // Bayer brut (caméra, DNG, FITS CFA), ou plans 16 bits déjà débayérisés / mono (FITS)
+            const layout = format === 'rgb16' ? 'rgb' : format === 'mono16' ? 'mono' : format === 'raw' ? 'bayer' : null;
+            if (!layout) throw new Error(`alignement étoiles : format RAW, mono16 ou rgb16 requis (reçu ${format})`);
             let tStep = performance.now();
             const lap = (key) => { const t = performance.now(); this.timings[key].push(t - tStep); tStep = t; };
-            if (this._initialized && (srcW !== this._cropW || srcH !== this._cropH)) this.reset();
-            const raw = bitDepth === 8
+            if (this._initialized && (srcW !== this._cropW || srcH !== this._cropH || layout !== this._layout)) this.reset();
+            this._layout = layout;
+            const raw = (layout === 'bayer' && bitDepth === 8)
                 ? Uint16Array.from(pixels, (v) => v << 8)
                 : new Uint16Array(pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength));
             await this._processStarsFrame(raw, srcW, srcH, bayer, frameIdx, gain, exposure_ms, lap,
-                                          meta.black_level ?? 0);
+                                          meta.black_level ?? 0, layout);
             return;
         }
 
@@ -713,6 +736,12 @@ export class StreamingStacker extends EventTarget {
         let analyzed;
         let tStep = performance.now();
         const lap = (key) => { const t = performance.now(); this.timings[key].push(t - tStep); tStep = t; };
+        // Pool élite : copie de l'image d'origine, pour pouvoir la réanalyser
+        // et la retirer du stack plus tard (même analyse → même contribution)
+        const store = this._selection === 'elite' && this._mode !== 'live'
+            ? { data: pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength),
+                format, srcW, srcH, cropSize, bayerPattern, bitDepth }
+            : null;
         if (format === 'jpeg' || format === 'png' || format === 'rgba') {
             const imgCopy = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
             analyzed = await this._analyzeImage(new Uint8Array(imgCopy), format, cropSize, frameIdx,
@@ -745,7 +774,13 @@ export class StreamingStacker extends EventTarget {
             this._sharpnessBuffer.shift();
 
         let accepted = this._mode === 'live';
-        if (!accepted) {
+        const elite = !!store;
+        if (elite) {
+            // pool pas plein : tout entre ; plein : seulement mieux que la pire
+            const pool = this._pool;
+            accepted = pool.length < this._poolSize
+                || this._lastSharpness > pool.reduce((m, e) => Math.min(m, e.score), Infinity);
+        } else if (!accepted) {
             if (this._sharpnessBuffer.length < 5) {
                 accepted = true;   // accepter les premières frames le temps de calibrer
             } else {
@@ -772,6 +807,8 @@ export class StreamingStacker extends EventTarget {
             await this._initStacking(float32Buffer, frameW, frameH);
             const zeroShifts = this._alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
             await this._stackFrame(float32Buffer, zeroShifts, sharpness);
+            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts: zeroShifts,
+                                         exposure_ms: exposure_ms ?? 0, gain: gain ?? 0 });
         } else {
             // 4. Alignement (optionnel) puis accumulation
             let shifts;
@@ -783,12 +820,15 @@ export class StreamingStacker extends EventTarget {
             lap('align');
             await this._stackFrame(float32Buffer, shifts, sharpness);
             lap('stack');
+            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts,
+                                         exposure_ms: exposure_ms ?? 0, gain: gain ?? 0 });
         }
 
         // 5. Compteurs
         this._stackedCount++;
         this._totalExpMs += exposure_ms ?? 0;
         this._gainSum    += gain ?? 0;
+        if (elite && this._pool.length > this._poolSize) await this._removeWorstFromPool();
 
         // 6. Preview
         const now = performance.now();
@@ -801,10 +841,42 @@ export class StreamingStacker extends EventTarget {
         }
     }
 
+    // Pool élite : retire du stack l'image la moins nette — réanalysée depuis
+    // sa copie d'origine puis recalée avec ses décalages et un poids −1, ce qui
+    // annule exactement sa contribution (accumulation linéaire).
+    async _removeWorstFromPool() {
+        const pool = this._pool;
+        let k = 0;
+        for (let i = 1; i < pool.length; i++) if (pool[i].score < pool[k].score) k = i;
+        const [e] = pool.splice(k, 1);
+        const st = e.store, id = -(++this._reqId);
+        const analyzed = (st.format === 'jpeg' || st.format === 'png' || st.format === 'rgba')
+            ? await this._analyzeImage(new Uint8Array(st.data), st.format, st.cropSize, id, st.srcW, st.srcH)
+            : await this._analyze(st.bitDepth === 8 ? new Uint8Array(st.data) : new Uint16Array(st.data),
+                                  st.srcW, st.srcH, st.cropSize, st.bayerPattern, id, st.bitDepth);
+        if (!analyzed?.float32Buffer) return;
+        await this._stackFrame(analyzed.float32Buffer, e.shifts, e.score, -1);
+        this._stackedCount--;
+        this._totalExpMs -= e.exposure_ms;
+        this._gainSum    -= e.gain;
+        this._poolReplaced++;
+    }
+
+    /** Pool élite : { size, capacity, minScore, replaced, bytes } (null en fenêtre glissante). */
+    get eliteStats() {
+        if (this._selection !== 'elite') return null;
+        const pool = this._pool;
+        return {
+            size: pool.length, capacity: this._poolSize, replaced: this._poolReplaced,
+            minScore: pool.length ? pool.reduce((m, e) => Math.min(m, e.score), Infinity) : 0,
+            bytes: pool.reduce((a, e) => a + e.store.data.byteLength, 0),
+        };
+    }
+
     // Mode 'stars' : une image Bayer → pixels chauds, étoiles, appariement,
     // rejet éventuel, drizzle dans le worker ; compte rendu dans
     // lastStarReport et dans l'événement 'frame' (detail.stars).
-    async _processStarsFrame(raw, w, h, bayer, frameIdx, gain, exposure_ms, lap, blackLevel = 0) {
+    async _processStarsFrame(raw, w, h, bayer, frameIdx, gain, exposure_ms, lap, blackLevel = 0, layout = 'bayer') {
         if (!this._initialized) {
             this._cropW = w;
             this._cropH = h;
@@ -817,7 +889,7 @@ export class StreamingStacker extends EventTarget {
                     }
                 };
                 this._stackWorker.addEventListener('message', handler);
-                this._stackWorker.postMessage({ type: 'init-stacking', width: w, height: h, bayer,
+                this._stackWorker.postMessage({ type: 'init-stacking', width: w, height: h, bayer, layout,
                                                 starAlign: this._starAlign });
             });
             this._initialized = true;
@@ -1050,7 +1122,7 @@ export class StreamingStacker extends EventTarget {
     }
 
     // Accumulation dans le stack GPU — float32Buffer transféré
-    _stackFrame(float32Buffer, shifts, sharpness) {
+    _stackFrame(float32Buffer, shifts, sharpness, weight = 1.0) {
         return new Promise((resolve, reject) => {
             const handler = ({ data }) => {
                 if (!data) return;
@@ -1069,7 +1141,7 @@ export class StreamingStacker extends EventTarget {
                 type:         'stack-frame-batch-rgba',
                 frames:       [{ rgbaBuffer: rgba, sharpness: Math.max(sharpness ?? 1, 0.001) }],
                 shifts:       [shifts],
-                frameWeights: [1.0],
+                frameWeights: [weight],   // −1 : retrait exact d'une image (pool élite)
             }, [rgba.buffer]);   // transfert zéro copie
         });
     }

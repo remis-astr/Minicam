@@ -94,8 +94,8 @@
       <input type="checkbox" id="align-toggle" checked style="width:auto;">
     </div>
     <div class="control-row control-row--inline">
-      <label for="dng-files" title="Rejoue une série de DNG locaux (rpicam-still) à la place de la caméra (lus dans le navigateur, rien n'est envoyé au Pi)">Test DNG</label>
-      <input type="file" id="dng-files" accept=".dng" multiple>
+      <label for="dng-files" title="Rejoue une série de fichiers locaux (DNG rpicam-still, FITS brut Bayer, mono ou RGB) à la place de la caméra (lus dans le navigateur, rien n'est envoyé au Pi)">Fichiers <span class="input-hint">(DNG, FITS)</span></label>
+      <input type="file" id="dng-files" accept=".dng,.fit,.fits,.fts" multiple>
       <button id="dng-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
     </div>
 
@@ -171,7 +171,9 @@
 <script type="module">
 import { StreamingStacker } from './stacker.js';
 import { DngFileSource } from './dng_file_source.js';
-import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl } from './ui_common.js';
+import { FitsFileSource } from './fits_file_source.js';
+import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
+         fillModeSelect, fillRoiSelect, parseRoi, ROI_CHOICES } from './ui_common.js';
 
 const WS_RAW = wsUrl('/ws/raw');
 
@@ -210,11 +212,6 @@ let lastStacker = null;
 const view = () => stacker ?? lastStacker;
 let seqRunning  = false;
 
-function parseRoi(val) {
-    if (!val || val === 'full') return null;
-    const [w, h] = val.split('x').map(Number);
-    return [w, h];
-}
 let seqTarget   = 0;
 let seqStart    = 0;
 let seqGainSave = null;
@@ -251,22 +248,10 @@ const elAlign = document.getElementById('align-toggle');
 // branché (statut /ws/control) — le ROI ne propose que des recadrages qui
 // tiennent dans le mode choisi. Grisés pendant l'empilement.
 const elMode = document.getElementById('mode-select');
-const ROI_CHOICES = [[1920, 1080], [1280, 720], [1024, 768], [800, 600], [640, 480], [512, 512]];
-function fillRoi(w, h) {
-    const prev = elRoi.value;
-    elRoi.innerHTML = '';
-    elRoi.add(new Option(`Plein champ (${w}×${h})`, 'full'));
-    for (const [rw, rh] of ROI_CHOICES)
-        if (rw <= w && rh <= h && (rw < w || rh < h)) elRoi.add(new Option(`${rw}×${rh}`, `${rw}x${rh}`));
-    elRoi.value = [...elRoi.options].some((o) => o.value === prev) ? prev : 'full';
-}
 function fillModes(info, current) {
-    elMode.innerHTML = '';
-    for (const m of info)
-        elMode.add(new Option(`${m.name} — ${m.width}×${m.height}${m.binned ? ' (binning)' : ''}`, m.name));
-    elMode.value = current;
+    fillModeSelect(elMode, info, current);
     const cur = info.find((m) => m.name === current);
-    if (cur) fillRoi(cur.width, cur.height);
+    if (cur) fillRoiSelect(elRoi, cur.width, cur.height, ROI_CHOICES.live);
 }
 elMode.addEventListener('change', () => { if (elMode.value) ctrlWs.setMode(elMode.value); });
 
@@ -398,13 +383,22 @@ btnStart.addEventListener('click', async () => {
         elStats.textContent = 'Erreur : ' + ev.detail.message;
     });
 
+    // Fichiers locaux : DNG ou FITS (une série d'un seul type), sinon la caméra
     const dngFiles = [...elDngFiles.files];
-    const source = dngFiles.length
-        ? new DngFileSource(dngFiles, {
-            onProgress: (i, n) => { elStatus.textContent = `DNG ${i} / ${n}`; },
+    const isFits = (f) => /\.(fits?|fts)$/i.test(f.name);
+    const kind = !dngFiles.length ? null : dngFiles.every(isFits) ? 'FITS' : dngFiles.some(isFits) ? 'mixte' : 'DNG';
+    if (kind === 'mixte') {
+        elStats.textContent = 'Choisir des fichiers d\'un seul type (DNG ou FITS)';
+        stacker = null; _resetUI();
+        return;
+    }
+    const SourceClass = kind === 'FITS' ? FitsFileSource : DngFileSource;
+    const source = kind
+        ? new SourceClass(dngFiles, {
+            onProgress: (i, n) => { elStatus.textContent = `${kind} ${i} / ${n}`; },
             onEnd: () => {
                 elStatus.className   = 'badge disconnected';
-                elStatus.textContent = 'DNG terminé';
+                elStatus.textContent = `${kind} terminé`;
                 stacker?.finish();   // dernière relecture : l'aperçu montre le stack complet
             },
         })
@@ -416,10 +410,14 @@ btnStart.addEventListener('click', async () => {
     try {
         await stacker.start(source);
         elStatus.className   = 'badge connected';
-        elStatus.textContent = dngFiles.length ? 'Lecture DNG' : 'Flux actif';
-        if (dngFiles.length) {
+        elStatus.textContent = kind ? `Lecture ${kind}` : 'Flux actif';
+        if (kind === 'DNG') {
             const h = source.header;
             console.log(`[DNG] ${source.fileCount} fichiers : ${h.width}×${h.height} ${h.bayer}, ${h.bits} bits, noir ${h.blackLevel}, pose ${(h.exposureMs / 1000).toFixed(1)} s`);
+        } else if (kind === 'FITS') {
+            const h = source.header;
+            console.log(`[FITS] ${source.fileCount} fichiers : ${h.width}×${h.height} ${h.layout}${h.bayer ? ' ' + h.bayer : ''}, `
+                        + `BITPIX ${h.bitpix}, données ${h.bits || 'flottantes'} bits (×${h.scale}), noir ${h.black} (${h.blackSrc}), pose ${(h.exposureMs / 1000).toFixed(1)} s`);
         }
     } catch (e) {
         elStats.textContent  = 'Erreur connexion : ' + e.message;

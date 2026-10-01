@@ -105,19 +105,37 @@
     </div>
 
     <div class="control-row control-row--inline">
-      <label for="roi-select">Résolution ROI</label>
+      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+      <select id="mode-select"><option value="">—</option></select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
       <select id="roi-select">
-        <option value="full" selected>1920×1080 (plein champ)</option>
-        <option value="1280x720">1280×720</option>
-        <option value="640x480">640×480</option>
+        <option value="full" selected>Plein champ</option>
       </select>
     </div>
 
-    <div class="range-row">
-      <label for="quality-slider">Meilleures frames</label>
+    <div class="control-row control-row--inline">
+      <label for="selection-select" title="Fenêtre glissante : chaque image est comparée aux 50 dernières, une image empilée le reste. Pool élite : le stack contient toujours les N images les plus nettes de toute la session ; une meilleure remplace la pire, retirée exactement du stack.">Sélection</label>
+      <select id="selection-select">
+        <option value="window" selected>Fenêtre glissante</option>
+        <option value="elite">Pool élite</option>
+      </select>
+    </div>
+
+    <div class="range-row" id="quality-row">
+      <label for="quality-slider">Meilleures frames <span class="input-hint">(des 50 dernières)</span></label>
       <input type="range" id="quality-slider" min="1" max="50" step="1" value="10">
       <span class="range-val" id="quality-val">10 %</span>
     </div>
+
+    <div class="range-row hidden" id="pool-row">
+      <label for="pool-size">Taille du pool <span class="input-hint">(meilleures images de la session)</span></label>
+      <input type="range" id="pool-size" min="10" max="1000" step="10" value="200">
+      <span class="range-val" id="pool-size-val">200</span>
+    </div>
+    <div class="input-hint hidden" id="pool-mem" style="margin:-4px 0 6px;"></div>
 
     <div class="control-row control-row--inline">
       <label for="align-mode">Alignement</label>
@@ -154,7 +172,11 @@
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
     </div>
 
-    <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter) ; aperçu et PNG, le FITS reste brut</div>
+    <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter), ou en direct si coché ; aperçu et PNG, le FITS reste brut</div>
+    <div class="control-row control-row--inline">
+      <label for="post-live" title="Applique ondelettes, débruitage et CLAHE à chaque aperçu pendant l'empilement (calcul sur le processeur, ~0,1–0,3 s par aperçu : aperçu un peu moins fluide)">Accentuation en direct</label>
+      <input type="checkbox" id="post-live" style="width:auto;">
+    </div>
 
     <div class="range-row">
       <label for="wav-1">Ondelettes 1 <span class="input-hint">(détail fin)</span></label>
@@ -227,8 +249,9 @@
 
 <script type="module">
 import { StreamingStacker } from './stacker.js';
-import { SerFileSource } from './ser_file_source.js';
-import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl } from './ui_common.js';
+import { SerFileSource, readSerHeader } from './ser_file_source.js';
+import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
+         fillModeSelect, fillRoiSelect, parseRoi, ROI_CHOICES } from './ui_common.js';
 
 const WS_RAW = wsUrl('/ws/raw');
 
@@ -257,6 +280,13 @@ const elWavDenoise = document.getElementById('wav-denoise');
 const elContrast   = document.getElementById('contrast');
 const elClahe      = document.getElementById('clahe');
 const elSaturation = document.getElementById('saturation');
+// Accentuation en direct : choix gardé d'une visite à l'autre
+const elPostLive = document.getElementById('post-live');
+try { elPostLive.checked = localStorage.getItem('lucky.postLive') === '1'; } catch {}
+elPostLive.addEventListener('change', () => {
+    try { localStorage.setItem('lucky.postLive', elPostLive.checked ? '1' : '0'); } catch {}
+    view()?.setPostLive(elPostLive.checked);
+});
 const postValues = () => ({
     wavelets:       elWav.map((e) => parseFloat(e.value)),
     waveletDenoise: parseFloat(elWavDenoise.value),
@@ -284,12 +314,24 @@ const btnSaveFits  = document.getElementById('btn-save-fits');
 const elSerFile    = document.getElementById('ser-file');
 const btnSerClear  = document.getElementById('ser-clear');
 
-elSerFile.addEventListener('change', () => {
+elSerFile.addEventListener('change', async () => {
+    // pool élite : une image SER est conservée telle que lue (Bayer 8/16 bits ou RGBA 8 bits)
+    serInfo = null;
+    const f = elSerFile.files[0];
+    if (f) {
+        try {
+            const h = await readSerHeader(f);
+            serInfo = { w: h.width, h: h.height, bpp: h.bayer ? h.bytesPx : 4 };
+        } catch {}
+    }
+    updateSelectionUi();
     btnSerClear.classList.toggle('hidden', !elSerFile.files.length);
 });
 btnSerClear.addEventListener('click', () => {
     elSerFile.value = '';
     btnSerClear.classList.add('hidden');
+    serInfo = null;
+    updateSelectionUi();
 });
 
 let stacker   = null;
@@ -299,11 +341,6 @@ const view = () => stacker ?? lastStacker;
 let totalSeen = 0;
 let accepted  = 0;
 
-function parseRoi(val) {
-    if (!val || val === 'full') return null;
-    const [w, h] = val.split('x').map(Number);
-    return [w, h];
-}
 
 // GPU check
 detectGpu().then(({ ok, reason }) => {
@@ -316,6 +353,8 @@ detectGpu().then(({ ok, reason }) => {
 // Camera WS
 const ctrlWs = new ControlWs();
 ctrlWs.onStatus = (msg) => {
+    if (msg.raw_modes_info) fillModes(msg.raw_modes_info, msg.raw_mode);
+    else if (msg.cmd === 'ack' && msg.raw_mode) ctrlWs.requestStatus();   // mode changé : dimensions à jour
     if (msg.gain !== undefined) elGain.value = parseFloat(msg.gain).toFixed(1);
     if (msg.exposure_ms !== undefined) elExpo.value = parseFloat(msg.exposure_ms).toFixed(1);
     elStatus.className  = 'badge connected';
@@ -335,6 +374,50 @@ elGain.addEventListener('change', () => {
 elExpo.addEventListener('change', () => {
     if (elSync.checked) ctrlWs.setExposure(parseFloat(elExpo.value));
     if (stacker) stacker.flush(3);
+});
+
+// Sélection : fenêtre glissante (curseur %) ou pool élite (curseur taille)
+const elSelection = document.getElementById('selection-select');
+const elPoolSize  = document.getElementById('pool-size');
+const elPoolVal   = document.getElementById('pool-size-val');
+const elPoolMem   = document.getElementById('pool-mem');
+try {
+    const sel = localStorage.getItem('lucky.selection'), n = localStorage.getItem('lucky.poolSize');
+    if (sel === 'elite' || sel === 'window') elSelection.value = sel;
+    if (n) elPoolSize.value = n;
+} catch {}
+// Mémoire du pool : une copie de l'image d'origine par membre (ROI, profondeur)
+const POOL_BUDGET = Math.min(1536, ((navigator.deviceMemory ?? 4) * 1024) / 4) * 2 ** 20;
+let modeSize = null;   // [w, h] du mode capteur courant (statut caméra)
+let serInfo = null;    // fichier SER choisi : { w, h, bpp } de l'image conservée
+function frameBytes() {
+    if (serInfo) return serInfo.w * serInfo.h * serInfo.bpp;
+    const roi = parseRoi(elRoi.value);
+    const [w, h] = roi ?? modeSize ?? [640, 480];
+    const fmt = elFormat.value;
+    const bpp = fmt === 'raw' ? (parseInt(elBitDepth.value) === 8 ? 1 : 2) : fmt === 'png' ? 1.5 : 0.3;
+    return w * h * bpp;
+}
+function poolCapacity(n) { return Math.max(10, Math.min(n, Math.floor(POOL_BUDGET / frameBytes()))); }
+function updateSelectionUi() {
+    const elite = elSelection.value === 'elite';
+    document.getElementById('quality-row').classList.toggle('hidden', elite);
+    document.getElementById('pool-row').classList.toggle('hidden', !elite);
+    elPoolMem.classList.toggle('hidden', !elite);
+    const n = parseInt(elPoolSize.value), cap = poolCapacity(n);
+    elPoolVal.textContent = n;
+    const mb = (cap * frameBytes() / 2 ** 20).toFixed(0);
+    elPoolMem.textContent = cap < n
+        ? `Mémoire limitée : pool ramené à ${cap} images (~${mb} Mo)`
+        : `Mémoire du pool : ~${mb} Mo (copie des images retenues)`;
+}
+elSelection.addEventListener('change', () => {
+    try { localStorage.setItem('lucky.selection', elSelection.value); } catch {}
+    updateSelectionUi();
+});
+elPoolSize.addEventListener('input', () => {
+    try { localStorage.setItem('lucky.poolSize', elPoolSize.value); } catch {}
+    updateSelectionUi();
 });
 
 // Range sliders
@@ -410,6 +493,19 @@ elFormat.addEventListener('change', () => {
 });
 updateRawRows();
 
+// Mode capteur et ROI (mêmes listes que Live Stack, recadrages planétaires)
+const elMode = document.getElementById('mode-select');
+function fillModes(info, current) {
+    fillModeSelect(elMode, info, current);
+    const cur = info.find((m) => m.name === current);
+    if (cur) {
+        modeSize = [cur.width, cur.height];
+        fillRoiSelect(elRoi, cur.width, cur.height, ROI_CHOICES.lucky);
+        updateSelectionUi();
+    }
+}
+elMode.addEventListener('change', () => { if (elMode.value) ctrlWs.setMode(elMode.value); });
+
 const elRoi = document.getElementById('roi-select');
 elRoi.addEventListener('change', () => {
     if (stacker) {
@@ -417,8 +513,21 @@ elRoi.addEventListener('change', () => {
         stacker.setRoi(roi?.[0] ?? null, roi?.[1] ?? null);
     }
 });
+// estimation mémoire du pool : dépend du ROI, de la profondeur et du format
+for (const el of [elRoi, elBitDepth, elFormat]) el.addEventListener('change', updateSelectionUi);
+updateSelectionUi();
 
 function updateStats() {
+    const el = view()?.eliteStats;
+    if (el) {
+        const v = view();
+        const expS  = v._totalExpMs > 0 ? (v._totalExpMs / 1000).toFixed(1) : '—';
+        elStats.textContent =
+            `Pool élite : ${el.size} / ${el.capacity} images  |  vues : ${totalSeen}\n` +
+            `Score : ${v.lastSharpness.toFixed(4)}  |  Seuil du pool : ${el.minScore.toFixed(4)}\n` +
+            `Remplacements : ${el.replaced}  |  Mémoire : ${(el.bytes / 2 ** 20).toFixed(0)} Mo  |  Exposition : ${expS} s`;
+        return;
+    }
     const sc     = stacker?.stackedCount ?? 0;
     const rate   = totalSeen > 0 ? (accepted / totalSeen * 100).toFixed(1) : '0.0';
     const score  = stacker ? stacker.lastSharpness.toFixed(4) : '—';
@@ -451,13 +560,18 @@ btnStart.addEventListener('click', async () => {
     elAlignRadius.disabled = true;
     elBitDepth.disabled    = true;
     elRoi.disabled         = true;
+    elMode.disabled        = true;
     elFormat.disabled      = true;
+    elSelection.disabled   = true;
+    elPoolSize.disabled    = true;
     lastStacker = null;
     stacker = new StreamingStacker({
         mode:    'lucky',
         canvas,
         options: {
             qualityThreshold: parseInt(elQuality.value) / 100,
+            selection:        elSelection.value,
+            poolSize:         poolCapacity(parseInt(elPoolSize.value)),
             alignMode:        elAlignMode.value,
             searchRadius:     parseInt(elAlignRadius.value),
             bitDepth:         parseInt(elBitDepth.value),
@@ -469,6 +583,7 @@ btnStart.addEventListener('click', async () => {
             stretchHigh:      parseFloat(elStretchHi.value) / 100,
             stretchBeta:      parseFloat(elStretchBeta.value),
             ...postValues(),
+            postLive:         elPostLive.checked,
             // Pas de cadence fixe : le Pi envoie au maximum, régulé par un
             // buffer de 8 images (aucune image perdue en Lucky Stack).
             flowCredits:      8,
@@ -482,6 +597,7 @@ btnStart.addEventListener('click', async () => {
     });
 
     stacker.addEventListener('preview', () => {
+        updateStats();   // compteurs après empilement (l'événement 'frame' les précède)
         placeholder.style.display = 'none';
         btnSavePng.disabled  = false;
         btnSaveFits.disabled = false;
@@ -498,7 +614,7 @@ btnStart.addEventListener('click', async () => {
             onEnd: () => {
                 elStatus.className   = 'badge disconnected';
                 elStatus.textContent = 'SER terminé';
-                stacker?.finish();
+                stacker?.finish().then(updateStats);
             },
         })
         : WS_RAW;
@@ -530,11 +646,15 @@ btnStop.addEventListener('click', async () => {
         s.stop();
     }
     lastStacker = s;
+    updateStats();
     elAlignMode.disabled   = false;
     elAlignRadius.disabled = false;
     elBitDepth.disabled    = false;
     elRoi.disabled         = false;
+    elMode.disabled        = false;
     elFormat.disabled      = false;
+    elSelection.disabled   = false;
+    elPoolSize.disabled    = false;
     elStatus.className   = 'badge disconnected';
     elStatus.textContent = 'Déconnecté';
     _resetUI();
