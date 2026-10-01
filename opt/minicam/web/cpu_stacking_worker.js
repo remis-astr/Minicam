@@ -1,8 +1,10 @@
 // cpu_stacking_worker.js — fallback CPU pour webgpu_stacking_worker.js
 // Même protocole de messages, accumulateur Float32 pur JavaScript.
 // Supporte : init, init-stacking, match-templates-batch, stack-frame-batch-rgba,
-//            get-stack-snapshot, cleanup.
+//            get-stack-snapshot, cleanup ; + mode étoiles (dso_worker_handler.js).
 'use strict';
+
+import { handleDsoMessage } from './dso_worker_handler.js';
 
 console.log('[cpu_stack] worker loaded');
 
@@ -102,6 +104,9 @@ function estimateShift(refGray, frmGray, w, h, searchRadius) {
 self.onmessage = async ({ data }) => {
     if (!data) return;
     const { type } = data;
+
+    // Live Stack ciel profond : alignement sur les étoiles (repli CPU)
+    if (await handleDsoMessage(data, { forceCpu: true })) return;
 
     // ── init ──────────────────────────────────────────────────────────────
     if (type === 'init') {

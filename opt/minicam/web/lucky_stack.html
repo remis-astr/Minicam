@@ -48,7 +48,7 @@
 
 <main>
   <div id="gpu-warn" class="gpu-warn hidden">
-    WebGPU non disponible — le stacking GPU ne fonctionnera pas.<br>
+    WebGPU indisponible — calculs sur le processeur (plus lent).<br>
     <span id="gpu-reason"></span>
   </div>
 
@@ -149,7 +149,7 @@
       <span class="range-val" id="stretch-beta-val">0</span>
     </div>
     <div class="range-row">
-      <label for="stretch-hi">Saturation <span class="input-hint">(percentile blanc)</span></label>
+      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
       <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
     </div>
@@ -196,6 +196,12 @@
       <label for="clahe">CLAHE <span class="input-hint">(contraste local)</span></label>
       <input type="range" id="clahe" min="0" max="100" step="1" value="0">
       <span class="range-val" id="clahe-val">0 %</span>
+    </div>
+
+    <div class="range-row">
+      <label for="saturation">Saturation <span class="input-hint">(couleurs, en direct)</span></label>
+      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+      <span class="range-val" id="saturation-val">100 %</span>
     </div>
 
     <div class="control-row control-row--inline">
@@ -250,22 +256,25 @@ const elWav        = [1, 2, 3, 4].map((j) => document.getElementById(`wav-${j}`)
 const elWavDenoise = document.getElementById('wav-denoise');
 const elContrast   = document.getElementById('contrast');
 const elClahe      = document.getElementById('clahe');
+const elSaturation = document.getElementById('saturation');
 const postValues = () => ({
     wavelets:       elWav.map((e) => parseFloat(e.value)),
     waveletDenoise: parseFloat(elWavDenoise.value),
     contrast:       parseInt(elContrast.value) / 100,
     clahe:          parseInt(elClahe.value) / 100,
+    saturation:     parseInt(elSaturation.value) / 100,
 });
-for (const el of [...elWav, elWavDenoise, elContrast, elClahe]) {
+for (const el of [...elWav, elWavDenoise, elContrast, elClahe, elSaturation]) {
     el.addEventListener('input', () => {
         document.getElementById(`${el.id}-val`).textContent =
-            el.value + (el === elContrast || el === elClahe ? ' %' : '');
+            el.value + (el === elContrast || el === elClahe || el === elSaturation ? ' %' : '');
         const s = view();
         if (!s) return;
         const v = postValues();
         s.setWavelets(v.wavelets, v.waveletDenoise);
         s.setContrast(v.contrast);
         s.setClahe(v.clahe);
+        s.setSaturation(v.saturation);
     });
 }
 const btnStop      = document.getElementById('btn-stop');

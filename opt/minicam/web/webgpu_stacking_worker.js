@@ -29,6 +29,8 @@ import {
     cleanupStackingBuffers
 } from './webgpu_stacking.js';
 
+import { handleDsoMessage } from './dso_worker_handler.js';
+
 console.log('[StackWorker] Modules loaded');
 
 let isReady = false;
@@ -57,6 +59,9 @@ async function init() {
 
 self.addEventListener('message', async (e) => {
     const { type } = e.data;
+
+    // Live Stack ciel profond : alignement sur les étoiles (dso_stacker.js)
+    if (await handleDsoMessage(e.data)) return;
 
     if (type === 'init') {
         await init();

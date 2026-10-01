@@ -53,9 +53,14 @@ Le dépôt suit l'arborescence du Pi :
 - **Flux caméra** : buffer de 8 images avec contrôle de flux par crédits
   (`{"cmd": "credit"}` sur `/ws/raw`) — le Pi envoie au maximum de ses
   capacités, sans image perdue. Mesuré en USB (IMX477, mode 480p_bin
-  852×480, pose 2 ms) : RAW 8 bits ROI 640×480 ≈ 33–52 img/s ; RAW 16 bits
-  ≈ 11 img/s ; JPEG ISP ≈ 29 img/s. Le capteur seul sort ~80 img/s. Les
-  autres pages gardent la cadence fixe.
+  852×480, pose 2 ms) : RAW 8 bits ROI 640×480 ≈ 50 img/s (limite du lien
+  USB, ~15,5 Mo/s) ; ROI 320×240 ≈ 80 img/s (cadence max du capteur) ;
+  RAW 16 bits ≈ 18 img/s ; JPEG ISP ≈ 40 img/s ; RAW 8 bits + zstd sur
+  scène texturée ≈ 32 img/s. En mode crédits, l'image suivante est
+  capturée/encodée pendant l'envoi de la précédente (capteur, CPU et lien
+  travaillent en même temps) ; une capture d'avance n'est jamais annulée
+  (elle garde le verrou caméra jusqu'au bout). Les autres pages gardent la
+  cadence fixe, une image à la fois.
 - **permessage-deflate désactivé** (`[api] ws_deflate = false` par défaut) :
   uvicorn acceptait cette extension proposée par les navigateurs, et
   compressait chaque image en zlib, en Python, sur le Pi — c'était le vrai
@@ -81,7 +86,17 @@ Le dépôt suit l'arborescence du Pi :
   profond), contraste (courbe en S) ; ondelettes à trous (4 couches +
   débruitage) et CLAHE appliqués **à la fin** du stack (SER terminé ou
   ■ Arrêter), qui garde l'image et laisse tous les réglages actifs. PNG =
-  image traitée, FITS = stack brut.
+  image traitée, FITS = stack brut. CLAHE : facteur borné pour qu'aucun
+  canal ne dépasse 255 (sinon la couleur vire au blanc). **Saturation**
+  (0–300 %, 100 % = inchangée, en direct) : écarte les canaux de la
+  luminance sans changer luminance ni teinte, sans écrêtage — compense
+  l'aspect délavé que donne CLAHE en éclaircissant. Le curseur de point
+  blanc s'appelait auparavant « Saturation (percentile blanc) ».
+- **GPU émulé** : si Chrome n'obtient que SwiftShader (Linux sans Vulkan
+  activé), le stacker l'écarte et calcule sur CPU ; l'avertissement orange
+  des pages Lucky/Live Stack le signale (avant, il n'apparaissait que sans
+  WebGPU du tout). Activer `chrome://flags/#enable-vulkan` et
+  `#enable-unsafe-webgpu`, puis relancer Chrome.
 - **WebGPU** : Chrome ne l'expose que sur une page sûre (HTTPS ou
   `localhost`). La page étant en HTTP : `ssh -N -L 8000:localhost:8000
   admin@<ip>` puis `http://localhost:8000/…`, ou
@@ -90,6 +105,36 @@ Le dépôt suit l'arborescence du Pi :
   fournit SwiftShader (GPU émulé, bien plus lent que les workers CPU : le
   stacker le refuse). La console indique `[Stacker] GPU=… (carte)` et, à la
   fin, la durée de chaque étape.
+
+## Live Stack (ciel profond) — notes
+
+- **Test DNG** : rejoue une série de DNG locaux (rpicam-still / picamera2,
+  CFA non compressé 8/16 bits) à la place de la caméra, dans l'ordre
+  naturel des noms (`…_2` avant `…_10`) ; lus dans le navigateur, rien n'est
+  envoyé au Pi (`web/dng_file_source.js`). Niveau de noir, niveau blanc et
+  pose lus dans le fichier (l'IFD Exif de rpicam est en fin de fichier). Un
+  fichier à l'en-tête abîmé est ignoré.
+- **Détection d'étoiles et alignement** (`web/star_align.js`) : luminance binnée 2×2, fond par blocs (moyenne
+  à rejet σ + médiane 3×3), filtre gaussien, maxima locaux à 5σ, centroïde
+  sub-pixel, FWHM, allongement, saturation — sur GPU (WebGPU), avec une
+  version CPU identique (repli et référence). Appariement par triangles
+  d'étoiles + RANSAC (rotation + translation, ou affine), insensible aux
+  grands sauts de dérive et aux recadrages. Mesuré sur 312 DNG de M27
+  (IMX462 1920×1080, RX 570) : détection GPU ≈ 7 ms (CPU ≈ 150–200 ms,
+  mêmes étoiles à 0,0001 px), appariement ≈ 5 ms, 312/312 images alignées
+  (dérive jusqu'à ~380 px, recadrage de −5,9°), résidu médian 0,57 px.
+- **Empilement** (`web/dso_stacker.js`, case « Alignement étoiles » = mode
+  `alignMode: 'stars'`) : dans le worker d'empilement (GPU, ou CPU sans
+  WebGPU), pour chaque image : soustraction du niveau de noir (DNG :
+  `BlackLevel` ; caméra : `black_level` des métadonnées `/ws/raw`, tiré de
+  `SensorBlackLevels` de libcamera, échelle 16 bits), détection, appariement
+  avec la 1re image, rejet si l'alignement échoue, normalisation additive du
+  fond (écart de médiane par canal avec la référence), recalage bilinéaire
+  et accumulation avec carte de couverture (bords non assombris). Le
+  planétaire (grille d'AP) est inchangé. Mesuré, 312 DNG M27 : 312/312
+  empilées, ~0,19 s/image (débayérisage CPU 116 ms + empilement 74 ms),
+  FWHM des étoiles 7,0 px (image seule) → 7,2 px (stack) ; GPU = CPU à
+  3·10⁻⁵ près.
 
 ## Installation sur une nouvelle carte SD
 

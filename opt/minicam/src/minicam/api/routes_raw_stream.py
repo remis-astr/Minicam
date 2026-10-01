@@ -19,6 +19,15 @@ _DEFAULT_FPS = 5
 _MAX_FPS = 120
 
 _capture_lock = asyncio.Lock()
+# Captures d'avance d'un client parti : référencées jusqu'à leur fin (asyncio
+# ne garde qu'une référence faible sur les tâches).
+_orphans: set[asyncio.Task] = set()
+
+
+def _discard_orphan(task: asyncio.Task) -> None:
+    _orphans.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.info("[ws/raw] capture d'avance abandonnée : %s", task.exception())
 _JPEG_QUALITY = 90
 
 
@@ -38,6 +47,11 @@ def _center_crop(arr, roi: tuple[int, int] | None):
     both the RAW and ISP encode paths below."""
     x0, y0, w, h = _center_box(arr.shape[1], arr.shape[0], roi)
     return arr[y0 : y0 + h, x0 : x0 + w]
+
+
+def _black_level(meta) -> float | None:
+    levels = (meta or {}).get("SensorBlackLevels")
+    return sum(levels) / len(levels) if levels else None
 
 
 def _capture_and_encode(
@@ -69,6 +83,9 @@ def _capture_and_encode(
         payload = zstd.compress(payload)
     t_done = time.monotonic()
     timing = {
+        # Niveau de noir du capteur (libcamera, échelle 16 bits comme les
+        # pixels envoyés) — à soustraire avant toute calibration couleur.
+        "black_level": _black_level(meta),
         "capture_ms": (t_unpack - t_cap) * 1000,
         "unpack_ms": (t_tobytes - t_unpack) * 1000,
         "tobytes_ms": (t_compress - t_tobytes) * 1000,
@@ -201,80 +218,114 @@ async def ws_raw(websocket: WebSocket) -> None:
     # avant de démarrer la capture — évite la race condition.
     await asyncio.sleep(0.05)
 
+    async def produce() -> tuple[bytes, dict, float]:
+        """Capture + encode one frame and build the full WS message."""
+        t0 = loop.time()
+        camera = app.state.camera
+
+        # Snapshot the mutable settings ONCE for this frame — roi/
+        # bit_depth/img_format are updated concurrently by recv_loop()
+        # while we're awaiting the executor below. Re-reading them
+        # afterward (for meta_json) instead of using this snapshot
+        # would let the label flip to a new value mid-flight while the
+        # payload was actually captured/encoded with the old one —
+        # a real, observed bug during testing, not just a theoretical
+        # race (caught e.g. a "format":"raw" frame whose payload was
+        # still PNG bytes from the previous setting).
+        cur_roi, cur_bit_depth, cur_format = roi, bit_depth, img_format
+        cur_compression = compression if cur_format == "raw" else "none"
+
+        # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
+        # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
+        # matériellement — voir _capture_and_encode_isp).
+        # Une seule capture à la fois, tous clients /ws/raw confondus :
+        # deux flux capturant en parallèle ont figé la caméra
+        # (« Camera frontend has timed out », threads bloqués).
+        async with _capture_lock:
+            if cur_format == "raw":
+                payload, h, w, timing = await loop.run_in_executor(
+                    None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression
+                )
+            else:
+                payload, h, w, timing = await loop.run_in_executor(
+                    None, _capture_and_encode_isp, camera, cur_roi, cur_format
+                )
+
+        meta_json = json.dumps({
+            # Legacy fields — kept for RPiCamera2 / minicam.py compat
+            "w": w,
+            "h": h,
+            "ExposureTime": camera.exposure_us,
+            "AnalogueGain": camera.gain,
+            # Canonical fields — used by the JS stacker (ws_frame_receiver.js)
+            "width": w,
+            "height": h,
+            "gain": camera.gain,
+            "exposure_us": camera.exposure_us,
+            "exposure_ms": round(camera.exposure_us / 1000, 3),
+            "bayer": camera.bayer_pattern,
+            "bit_depth": cur_bit_depth,
+            "format": cur_format,
+            "compression": cur_compression,
+            "black_level": timing.get("black_level"),
+            "ts": t0,
+        }).encode()
+
+        # Pad JSON to even length so rawOffset = 4+jsonLen is Uint16-aligned
+        if len(meta_json) % 2:
+            meta_json += b" "
+        return struct.pack(">I", len(meta_json)) + meta_json + payload, timing, t0
+
+    async def take_credit() -> bool:
+        """Mode crédits : attend un crédit et le consomme. False = arrêt."""
+        nonlocal credits
+        while credits <= 0 and running and not recv_task.done():
+            credit_event.clear()
+            try:
+                await asyncio.wait_for(credit_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+        if not running or recv_task.done():
+            return False
+        credits -= 1
+        return True
+
+    # Mode crédits : l'image suivante est capturée/encodée (thread pool)
+    # pendant l'envoi de la précédente, s'il reste un crédit — capteur, CPU
+    # (extraction, zstd) et liaison travaillent en même temps au lieu de se
+    # succéder. Cadence fixe : une image à la fois, comme avant.
+    pending: asyncio.Task | None = None
     try:
         while running:
             if app.state.indi_mode:
                 await websocket.send_text(json.dumps({"cmd": "error", "detail": "INDI mode active"}))
                 break
 
-            if credits is not None:
-                while credits <= 0 and running and not recv_task.done():
-                    credit_event.clear()
-                    try:
-                        await asyncio.wait_for(credit_event.wait(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        pass
-                if not running or recv_task.done():
+            if pending is None:
+                if credits is not None and not await take_credit():
                     break
-                credits -= 1
+                pending = asyncio.create_task(produce())
 
-            t0 = loop.time()
             try:
-                camera = app.state.camera
+                task, pending = pending, None
+                # shield : annuler ce handler ne doit pas annuler la capture
+                # (même raison que dans le finally ci-dessous).
+                message, timing, t0 = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pending = task
+                raise
+            except Exception as e:
+                log.warning("Raw WS capture error: %s", e)
+                await asyncio.sleep(0.5)
+                continue
 
-                # Snapshot the mutable settings ONCE for this iteration — roi/
-                # bit_depth/img_format are updated concurrently by recv_loop()
-                # while we're awaiting the executor below. Re-reading them
-                # afterward (for meta_json) instead of using this snapshot
-                # would let the label flip to a new value mid-flight while the
-                # payload was actually captured/encoded with the old one —
-                # a real, observed bug during testing, not just a theoretical
-                # race (caught e.g. a "format":"raw" frame whose payload was
-                # still PNG bytes from the previous setting).
-                cur_roi, cur_bit_depth, cur_format = roi, bit_depth, img_format
-                cur_compression = compression if cur_format == "raw" else "none"
+            if credits is not None and credits > 0 and running and not recv_task.done():
+                credits -= 1
+                pending = asyncio.create_task(produce())
 
-                # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
-                # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
-                # matériellement — voir _capture_and_encode_isp).
-                # Une seule capture à la fois, tous clients /ws/raw confondus :
-                # deux flux capturant en parallèle ont figé la caméra
-                # (« Camera frontend has timed out », threads bloqués).
-                async with _capture_lock:
-                    if cur_format == "raw":
-                        payload, h, w, timing = await loop.run_in_executor(
-                            None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression
-                        )
-                    else:
-                        payload, h, w, timing = await loop.run_in_executor(
-                            None, _capture_and_encode_isp, camera, cur_roi, cur_format
-                        )
-
-                meta_json = json.dumps({
-                    # Legacy fields — kept for RPiCamera2 / minicam.py compat
-                    "w": w,
-                    "h": h,
-                    "ExposureTime": camera.exposure_us,
-                    "AnalogueGain": camera.gain,
-                    # Canonical fields — used by the JS stacker (ws_frame_receiver.js)
-                    "width": w,
-                    "height": h,
-                    "gain": camera.gain,
-                    "exposure_us": camera.exposure_us,
-                    "exposure_ms": round(camera.exposure_us / 1000, 3),
-                    "bayer": camera.bayer_pattern,
-                    "bit_depth": cur_bit_depth,
-                    "format": cur_format,
-                    "compression": cur_compression,
-                    "ts": t0,
-                }).encode()
-
-                # Pad JSON to even length so rawOffset = 4+jsonLen is Uint16-aligned
-                if len(meta_json) % 2:
-                    meta_json += b" "
+            try:
                 t_send_start = loop.time()
-                header = struct.pack(">I", len(meta_json))
-                await websocket.send_bytes(header + meta_json + payload)
+                await websocket.send_bytes(message)
                 t_send_end = loop.time()
 
                 _frame_count += 1
@@ -304,11 +355,7 @@ async def ws_raw(websocket: WebSocket) -> None:
                 if "websocket" in str(e).lower():
                     log.info("[ws/raw] WebSocket fermé côté client (ASGI RuntimeError) — arrêt propre")
                     break
-                log.warning("Raw WS capture RuntimeError (non-WS): %s", e)
-                await asyncio.sleep(0.5)
-                continue
-            except Exception as e:
-                log.warning("Raw WS capture error: %s", e)
+                log.warning("Raw WS send RuntimeError (non-WS): %s", e)
                 await asyncio.sleep(0.5)
                 continue
 
@@ -319,6 +366,12 @@ async def ws_raw(websocket: WebSocket) -> None:
                     await asyncio.sleep(wait)
     finally:
         recv_task.cancel()
+        if pending is not None:
+            # Ne pas annuler une capture d'avance : annulée, elle rendrait le
+            # verrou caméra alors que le thread capture encore. On la laisse
+            # finir (quelques ms) et on jette son image.
+            _orphans.add(pending)
+            pending.add_done_callback(_discard_orphan)
         before = app.state.raw_clients
         app.state.raw_clients = max(0, app.state.raw_clients - 1)
         log.info("[ws/raw] client DISCONNECTED — raw_clients %d→%d", before, app.state.raw_clients)

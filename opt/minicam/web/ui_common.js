@@ -7,9 +7,16 @@
 export async function detectGpu() {
     if (!navigator.gpu) return { ok: false, reason: 'WebGPU non disponible dans ce navigateur.' };
     try {
-        const adapter = await navigator.gpu.requestAdapter();
+        const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
         if (!adapter) return { ok: false, reason: 'Pas de GPU WebGPU accessible (adaptateur null).' };
-        return { ok: true };
+        // Même critère que StreamingStacker : SwiftShader (GPU émulé sur le
+        // processeur) est refusé, le calcul part sur les workers CPU.
+        const info = adapter.info ?? {};
+        if (info.isFallbackAdapter || info.architecture === 'swiftshader')
+            return { ok: false, emulated: true,
+                     reason: `GPU émulé (${info.description || 'SwiftShader'}). Sous Linux, activer `
+                           + 'chrome://flags/#enable-vulkan et #enable-unsafe-webgpu puis relancer Chrome.' };
+        return { ok: true, name: info.description || `${info.vendor ?? ''} ${info.architecture ?? ''}`.trim() };
     } catch (e) {
         return { ok: false, reason: String(e) };
     }

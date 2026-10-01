@@ -195,8 +195,11 @@ function applyWavelets(rgba, w, h, amounts, denoise = 0) {
  * CLAHE sur la luminance d'une image RGBA 8 bits (en place) : histogrammes
  * écrêtés par tuile (grille tiles×tiles), interpolation bilinéaire entre
  * tuiles, puis mélange avec l'original selon strength (0–1). Les canaux sont
- * mis à l'échelle par Y'/Y (teinte conservée). Le fond quasi noir (Y < 4)
- * n'est pas touché, pour ne pas faire ressortir le bruit du ciel.
+ * mis à l'échelle par Y'/Y (teinte conservée), facteur borné pour que le
+ * canal le plus fort ne dépasse pas 255 : écrêté seul, il laissait monter
+ * les deux autres et la couleur virait au blanc (couleurs délavées). Le fond
+ * quasi noir (Y < 4) n'est pas touché, pour ne pas faire ressortir le bruit
+ * du ciel.
  */
 function applyClahe(d, w, h, strength, clipLimit = 3, tiles = 8) {
     if (strength <= 0) return;
@@ -232,11 +235,36 @@ function applyClahe(d, w, h, strength, clipLimit = 3, tiles = 8) {
             const top = maps[ty0 * tiles + tx0][v] * (1 - fx) + maps[ty0 * tiles + tx1][v] * fx;
             const bot = maps[ty1 * tiles + tx0][v] * (1 - fx) + maps[ty1 * tiles + tx1][v] * fx;
             const eq  = top * (1 - fy) + bot * fy;
-            const r   = (v + strength * (eq - v)) / v;
-            d[i*4]   = Math.min(255, d[i*4]   * r);
-            d[i*4+1] = Math.min(255, d[i*4+1] * r);
-            d[i*4+2] = Math.min(255, d[i*4+2] * r);
+            const mx  = Math.max(d[i*4], d[i*4+1], d[i*4+2]);
+            const r   = Math.min((v + strength * (eq - v)) / v, 255 / mx);
+            d[i*4]   = d[i*4]   * r;
+            d[i*4+1] = d[i*4+1] * r;
+            d[i*4+2] = d[i*4+2] * r;
         }
+    }
+}
+
+/**
+ * Saturation des couleurs d'une image RGBA 8 bits (en place) : chaque canal
+ * est écarté de la luminance Y d'un facteur sat (1 = inchangé, 0 = gris).
+ * Luminance et teinte conservées ; le facteur est réduit pixel par pixel
+ * pour qu'aucun canal ne sorte de [0, 255] (pas d'écrêtage qui fausserait
+ * la teinte).
+ */
+function applySaturation(d, n, sat) {
+    if (sat === 1) return;
+    for (let i = 0; i < n * 4; i += 4) {
+        const r = d[i], g = d[i+1], b = d[i+2];
+        const y = 0.299 * r + 0.587 * g + 0.114 * b;
+        let k = sat;
+        for (const c of [r, g, b]) {
+            const dc = c - y;
+            if (dc * k > 255 - y) k = (255 - y) / dc;
+            else if (dc * k < -y) k = -y / dc;
+        }
+        d[i]   = y + k * (r - y);
+        d[i+1] = y + k * (g - y);
+        d[i+2] = y + k * (b - y);
     }
 }
 
@@ -245,7 +273,7 @@ function applyClahe(d, w, h, strength, clipLimit = 3, tiles = 8) {
 // ---------------------------------------------------------------------------
 
 function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
-                         contrast = 0, clahe = 0) {
+                         contrast = 0, clahe = 0, saturation = 1) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     const [gR, gG, gB] = awbGains ?? [1, 1, 1];
@@ -298,6 +326,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
         d[i*4 + 3] = 255;
     }
     applyClahe(d, w, h, clahe);
+    applySaturation(d, n, saturation);
     canvas.getContext('2d').putImageData(idata, 0, 0);
 }
 
@@ -352,6 +381,9 @@ export class StreamingStacker extends EventTarget {
         this._waveletDenoise   = options.waveletDenoise ?? 0;
         this._contrast         = options.contrast ?? 0;
         this._clahe            = options.clahe ?? 0;
+        this._saturation       = options.saturation ?? 1;
+        // Mode alignMode 'stars' (ciel profond) : options de dso_stacker.js
+        this._starAlign        = options.starAlign ?? {};
         // Ondelettes + CLAHE : coûteux, appliqués seulement une fois le stack
         // terminé (setPostProcessing(true)) — pendant l'empilement, l'aperçu
         // n'a que l'étirement et le contraste (LUT, quasi gratuits).
@@ -494,6 +526,8 @@ export class StreamingStacker extends EventTarget {
     setContrast(c) { this._contrast = c; this._scheduleRender(); }
 
     setClahe(strength) { this._clahe = strength; this._scheduleRender(); }
+    /** Saturation des couleurs (1 = inchangée), appliquée à l'aperçu en direct. */
+    setSaturation(sat) { this._saturation = sat; this._scheduleRender(); }
 
     /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
     setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
@@ -667,6 +701,14 @@ export class StreamingStacker extends EventTarget {
             this.reset();
         }
 
+        // Ciel profond : alignement sur les étoiles, tout dans le worker
+        // d'empilement (dso_stacker.js) — pas de grille d'AP ni de seuil de netteté.
+        if (this._alignMode === 'stars') {
+            await this._processStarsFrame(analyzed, frameW, frameH, frameIdx, gain, exposure_ms, lap,
+                                          meta.black_level ?? 0);
+            return;
+        }
+
         // 2. Qualité adaptative — fenêtre glissante 50 frames, seuil = percentile (1 - threshold)
         this._lastSharpness = sharpness ?? 0;
         this._sharpnessBuffer.push(this._lastSharpness);
@@ -729,6 +771,74 @@ export class StreamingStacker extends EventTarget {
             lap('preview');
         }
     }
+
+    // Mode 'stars' : une image → détection, appariement, rejet éventuel,
+    // recalage et accumulation dans le worker ; compte rendu dans
+    // lastStarReport et dans l'événement 'frame' (detail.stars).
+    async _processStarsFrame(analyzed, w, h, frameIdx, gain, exposure_ms, lap, blackLevel = 0) {
+        const rgba = analyzed.float32Buffer
+            ? new Float32Array(analyzed.float32Buffer)
+            : Float32Array.from(new Uint8Array(analyzed.uint8Buffer), (v) => v / 255);
+        if (!this._initialized) {
+            this._cropW = w;
+            this._cropH = h;
+            await new Promise((resolve, reject) => {
+                const handler = ({ data }) => {
+                    if (data?.type === 'init-stacking-done') {
+                        this._stackWorker.removeEventListener('message', handler); resolve();
+                    } else if (data?.type === 'init-stacking-error') {
+                        this._stackWorker.removeEventListener('message', handler); reject(new Error(data.error));
+                    }
+                };
+                this._stackWorker.addEventListener('message', handler);
+                this._stackWorker.postMessage({ type: 'init-stacking', width: w, height: h,
+                                                starAlign: this._starAlign });
+            });
+            this._initialized = true;
+            this._rejectedCount = 0;
+        }
+        const report = await new Promise((resolve, reject) => {
+            const requestId = ++this._reqId;
+            const handler = ({ data }) => {
+                if (!data || data.requestId !== requestId) return;
+                if (data.type === 'stack-stars-done') {
+                    this._stackWorker.removeEventListener('message', handler); resolve(data.report);
+                } else if (data.type === 'stack-frame-error') {
+                    this._stackWorker.removeEventListener('message', handler); reject(new Error(data.error));
+                }
+            };
+            this._stackWorker.addEventListener('message', handler);
+            // Noir capteur en unités 0–1 (pixels 16 bits normalisés par 65535 ;
+            // en 8 bits, l'octet de poids fort /255 donne la même échelle).
+            this._stackWorker.postMessage({ type: 'stack-frame-stars', requestId, rgbaBuffer: rgba,
+                                            black: blackLevel / 65535 },
+                                          [rgba.buffer]);
+        });
+        lap('stack');
+        this._lastStarReport = report;
+        if (report.accepted) {
+            this._stackedCount++;
+            this._totalExpMs += exposure_ms ?? 0;
+            this._gainSum    += gain ?? 0;
+        } else {
+            this._rejectedCount = (this._rejectedCount ?? 0) + 1;
+            console.log(`[Stacker] image ${frameIdx} rejetée : ${report.reason}`);
+        }
+        this.dispatchEvent(new CustomEvent('frame', { detail: {
+            frameIndex: frameIdx, accepted: report.accepted, stackedCount: this._stackedCount,
+            droppedFrames: this._receiver?.droppedFrames ?? 0, stars: report,
+        }}));
+        const now = performance.now();
+        if (report.accepted && this._canvas
+            && (this._stackedCount === 1 || now - this._lastPreviewAt >= this._previewIntervalMs)) {
+            this._lastPreviewAt = now;
+            await this._updatePreview();
+            lap('preview');
+        }
+    }
+
+    get lastStarReport() { return this._lastStarReport ?? null; }
+    get rejectedCount()  { return this._rejectedCount ?? 0; }
 
     // -------------------------------------------------------------------------
     // Appels workers
@@ -976,7 +1086,8 @@ export class StreamingStacker extends EventTarget {
         const sharpened = post ? applyWavelets(snap.data, w, h, this._wavelets, this._waveletDenoise)
                                : snap.data;
         stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
-                        this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0);
+                        this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
+                        this._saturation);
         this.dispatchEvent(new CustomEvent('preview'));
     }
 }
