@@ -188,8 +188,34 @@ Le dépôt suit l'arborescence du Pi :
      5 en dessous, tolérance de 15 % du signal (turbulence sur les étoiles) ;
   7. la meilleure (FWHM) des 5 premières images devient la référence.
 
-  Affichage : saturation des couleurs et « Fond neutre » (médianes R, G, B
-  égalisées). ■ Arrêter (ou fin des DNG) relit le stack complet et le garde :
+  Affichage : menu **Étirement** (`web/auto_stretch.js`), **Auto** par
+  défaut, **Manuel** = réglages historiques (percentile noir, arcsinh β,
+  point blanc, « Fond neutre » : médianes R, G, B égalisées).
+  Auto : arcsinh à couleurs préservées (courbe calculée sur la luminance,
+  R, G, B multipliés par le même facteur : le cœur des galaxies ne délave
+  plus en blanc), noir de chaque canal à médiane − 2,8 σ (MAD) donc fond
+  neutre, balance des blancs sur le signal (étoiles + objet > 10 σ, non
+  saturés), β choisi pour que le fond tombe au niveau « Fond ». Fond
+  automatique : 10 % au premier aperçu, monte à 18 % quand le bruit du
+  stack a baissé d'un facteur 5 (≈ 25 images), sinon fixé au curseur
+  (5–30 %). Statistiques lissées d'un aperçu à l'autre. « Contraste local »
+  (curseur 0–150 %, 80 % par défaut, 0 = désactivé, les deux modes) :
+  renforce les structures larges (flou large calculé sur l'image réduite
+  ÷4, hautes lumières protégées ; en Manuel, appliqué à l'image étirée,
+  ≈ 0,6 s en 4K). « Retirer le vert »
+  (les deux modes, coché par défaut) : SCNR neutre moyen calculé sur les
+  moyennes locales (≈ 12 px) et appliqué comme facteur doux, luminosité
+  conservée ; un SCNR pixel par pixel remplaçait le vert, canal le moins
+  bruité, par le bruit du rouge et du bleu (grain du cœur de M31 +35 %,
+  noyau aplati). Choix mémorisés
+  dans le navigateur (`live.*`). Coût mesuré sur 4056×2160 : ≈ 2,4 s par
+  aperçu avec contraste local et retrait du vert (2,9 s pour l'ancien étirement), quatre fois
+  moins en 1080p. Lucky Stack n'est pas concerné. Le FITS reste brut.
+  Saturation des couleurs dans les deux modes. Aperçu pendant
+  l'empilement : au plus toutes les 500 ms ET au moins 2× la durée du
+  dernier rendu, comptés depuis sa fin (en 4K l'aperçu prend 1–2 s et
+  bloque le pipeline : il passait sinon après chaque image). Tris des
+  percentiles en tableaux typés (étirement Manuel 4K : 2,9 → 1,4 s). ■ Arrêter (ou fin des DNG) relit le stack complet et le garde :
   étirement, point blanc, saturation, fond neutre et exports PNG/FITS
   restent actifs ; ▶ Démarrer ou ↺ Reset l'oublient. Case « Alignement étoiles » décochée :
   même empilement sans recalage (monture guidée) ; grisée pendant

@@ -1,6 +1,7 @@
 'use strict';
 
 import { WsFrameReceiver } from './ws_frame_receiver.js';
+import { autoStretchParams, autoStretchRender, removeGreen8, localContrast8 } from './auto_stretch.js';
 
 // Bayer pattern string → integer (OpenCV inverted naming : BG=RGGB, RG=BGGR, ...)
 const BAYER_INT = { RGGB: 0, BGGR: 1, GRBG: 2, GBRG: 3 };
@@ -273,19 +274,23 @@ function applySaturation(d, n, sat) {
 // ---------------------------------------------------------------------------
 
 function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
-                         contrast = 0, clahe = 0, saturation = 1, bgNeutral = false) {
+                         contrast = 0, clahe = 0, saturation = 1, bgNeutral = false,
+                         removeGreen = false, localContrast = 0) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     // Fond neutre : médianes R, G, B ramenées à leur moyenne (retire la
     // dominante du ciel ; additif, n'affecte pas les rapports des étoiles)
     if (bgNeutral) {
-        const ch = [[], [], []];
+        // tableaux typés : tri numérique natif, ~10× plus rapide qu'Array.sort
+        const cap = Math.ceil(n / 16);
+        const ch = [new Float32Array(cap), new Float32Array(cap), new Float32Array(cap)];
+        let cnt = 0;
         for (let i = 0; i < n; i += 16) {
             if (rgba[i*4+3] <= 0) continue;   // pixel jamais couvert (stack ciel profond)
-            ch[0].push(rgba[i*4]); ch[1].push(rgba[i*4+1]); ch[2].push(rgba[i*4+2]);
+            ch[0][cnt] = rgba[i*4]; ch[1][cnt] = rgba[i*4+1]; ch[2][cnt] = rgba[i*4+2]; cnt++;
         }
-        if (ch[0].length) {
-            const med = ch.map((a) => a.sort((p, q) => p - q)[a.length >> 1]);
+        if (cnt) {
+            const med = ch.map((a) => a.subarray(0, cnt).sort()[cnt >> 1]);
             const m = (med[0] + med[1] + med[2]) / 3;
             for (let i = 0; i < n; i++) {
                 rgba[i*4] -= med[0] - m; rgba[i*4+1] -= med[1] - m; rgba[i*4+2] -= med[2] - m;
@@ -298,13 +303,14 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     // sur la luminance AVANT balance des blancs : les gains R/B restent
     // proches de 1 en pratique, donc la plage de stretch n'a pas besoin
     // d'être recalculée après application des gains.
-    const samples = [];
+    const all = new Float32Array(Math.ceil(n / 16));
+    let ns = 0;
     for (let i = 0; i < n; i += 16) {
         const lum = 0.299 * rgba[i*4] + 0.587 * rgba[i*4+1] + 0.114 * rgba[i*4+2];
-        if (lum > 0) samples.push(lum);
+        if (lum > 0) all[ns++] = lum;
     }
-    if (!samples.length) return;
-    samples.sort((a, b) => a - b);
+    if (!ns) return;
+    const samples = all.subarray(0, ns).sort();
     const lo  = samples[Math.max(0, Math.floor(low  * samples.length))];
     const hi  = samples[Math.min(samples.length - 1, Math.floor(high * samples.length))];
     const rng = Math.max(hi - lo, 1e-7);
@@ -341,9 +347,31 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
         }
         d[i*4 + 3] = 255;
     }
+    if (removeGreen) removeGreen8(d, w, h);
+    localContrast8(d, w, h, localContrast);
     applyClahe(d, w, h, clahe);
     applySaturation(d, n, saturation);
     canvas.getContext('2d').putImageData(idata, 0, 0);
+}
+
+// Étirement automatique (auto_stretch.js) : arcsinh à couleurs préservées,
+// noir, balance des blancs et force déduits de l'image ; state = lissage
+// entre aperçus, key = identité du snapshot. Renvoie les paramètres utilisés.
+function autoStretchToCanvas(float32Data, w, h, canvas, state, key,
+                             { target = null, localContrast = 0, removeGreen = false,
+                               count = 1, clahe = 0, saturation = 1 } = {}) {
+    const rgba = float32Data instanceof Float32Array ? float32Data : new Float32Array(float32Data);
+    const p = autoStretchParams(rgba, w, h, state, key, target, { count });
+    if (!p) return null;
+    canvas.width  = w;
+    canvas.height = h;
+    const idata = new ImageData(w, h);
+    autoStretchRender(rgba, w, h, p, idata.data, { localContrast });
+    if (removeGreen) removeGreen8(idata.data, w, h);
+    applyClahe(idata.data, w, h, clahe);
+    applySaturation(idata.data, w * h, saturation);
+    canvas.getContext('2d').putImageData(idata, 0, 0);
+    return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +424,10 @@ export class StreamingStacker extends EventTarget {
         // acceptée donnait un traitement par à-coups. finish() force le dernier.
         this._previewIntervalMs = options.previewIntervalMs ?? 500;
         this._lastPreviewAt    = 0;
+        // Prochain aperçu au plus tôt : intervalle compté depuis la FIN du
+        // rendu et au moins 2× sa durée (l'aperçu bloque le pipeline ; en
+        // 4K il prend plusieurs secondes et passait sinon après chaque image)
+        this._nextPreviewAt    = 0;
         // Durées par étape (ms), résumées par timingSummary()
         this.timings = { analyze: [], align: [], stack: [], preview: [] };
         this._awbEnabled       = options.awb ?? false;
@@ -406,6 +438,13 @@ export class StreamingStacker extends EventTarget {
         this._clahe            = options.clahe ?? 0;
         this._saturation       = options.saturation ?? 1;
         this._bgNeutral        = options.bgNeutral ?? false;
+        // Étirement : 'manual' (percentiles + β, historique) | 'auto' (auto_stretch.js)
+        this._stretchMode      = options.stretchMode ?? 'manual';
+        this._stretchTarget    = options.stretchTarget ?? null;   // fond visé 0–1, null = automatique
+        this._localContrast    = options.localContrast ?? 0;      // amplitude, 0 = désactivé (les deux modes)
+        this._removeGreen      = options.removeGreen ?? false;    // les deux modes
+        this._autoState        = {};
+        this.lastAutoStretch   = null;   // derniers paramètres auto (affichage)
         // Mode alignMode 'stars' (ciel profond) : options de dso_stacker.js
         this._starAlign        = options.starAlign ?? {};
         // Ondelettes + CLAHE (CPU, ~0,1–0,3 s par aperçu) : par défaut
@@ -524,6 +563,8 @@ export class StreamingStacker extends EventTarget {
         this._sharpnessBuffer = [];
         this._lastSharpness   = 0;
         this._lastSnap        = null;
+        this._autoState       = {};
+        this.lastAutoStretch  = null;
         this._finished        = false;
         this._pool            = [];
         this._poolReplaced    = 0;
@@ -560,6 +601,13 @@ export class StreamingStacker extends EventTarget {
     setSaturation(sat) { this._saturation = sat; this._scheduleRender(); }
     /** Fond de ciel neutre à l'affichage (médianes R, G, B égalisées). */
     setBgNeutral(on) { this._bgNeutral = on; this._scheduleRender(); }
+    /** 'manual' | 'auto' */
+    setStretchMode(mode) { this._stretchMode = mode; this._scheduleRender(); }
+    /** Fond visé en mode auto (0–1), null = automatique selon le bruit du stack. */
+    setStretchTarget(t) { this._stretchTarget = t; this._scheduleRender(); }
+    /** Contraste local grande échelle : amplitude (0,8 = réglage par défaut de la page), 0 = désactivé. */
+    setLocalContrast(amount) { this._localContrast = amount; this._scheduleRender(); }
+    setRemoveGreen(on) { this._removeGreen = on; this._scheduleRender(); }
 
     /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
     setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
@@ -833,10 +881,11 @@ export class StreamingStacker extends EventTarget {
         // 6. Preview
         const now = performance.now();
         if (this._canvas && this._stackedCount % this._previewEveryN === 0
-            && (this._stackedCount === 1 || now - this._lastPreviewAt >= this._previewIntervalMs)) {
+            && (this._stackedCount === 1 || now >= this._nextPreviewAt)) {
             this._lastPreviewAt = now;
             tStep = performance.now();
             await this._updatePreview();
+            this._previewDone(now);
             lap('preview');
         }
     }
@@ -926,11 +975,17 @@ export class StreamingStacker extends EventTarget {
         }}));
         const now = performance.now();
         if (report.accepted && this._canvas
-            && (this._stackedCount === 1 || now - this._lastPreviewAt >= this._previewIntervalMs)) {
+            && (this._stackedCount === 1 || now >= this._nextPreviewAt)) {
             this._lastPreviewAt = now;
             await this._updatePreview();
+            this._previewDone(now);
             lap('preview');
         }
+    }
+
+    _previewDone(startedAt) {
+        const end = performance.now();
+        this._nextPreviewAt = end + Math.max(this._previewIntervalMs, 2 * (end - startedAt));
     }
 
     get lastStarReport() { return this._lastStarReport ?? null; }
@@ -1184,9 +1239,17 @@ export class StreamingStacker extends EventTarget {
         const post = this._postActive;
         const sharpened = post ? applyWavelets(snap.data, w, h, this._wavelets, this._waveletDenoise)
                                : snap.data;
-        stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
-                        this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
-                        this._saturation, this._bgNeutral);
+        if (this._stretchMode === 'auto') {
+            this.lastAutoStretch = autoStretchToCanvas(sharpened, w, h, this._canvas, this._autoState, snap, {
+                target: this._stretchTarget, localContrast: this._localContrast,
+                removeGreen: this._removeGreen, count: Math.max(1, this._stackedCount),
+                clahe: post ? this._clahe : 0, saturation: this._saturation,
+            });
+        } else {
+            stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
+                            this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
+                            this._saturation, this._bgNeutral, this._removeGreen, this._localContrast);
+        }
         this.dispatchEvent(new CustomEvent('preview'));
     }
 }

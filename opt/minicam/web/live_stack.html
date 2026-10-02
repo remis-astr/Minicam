@@ -99,6 +99,25 @@
       <button id="dng-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
     </div>
 
+    <div class="control-row control-row--inline">
+      <label for="stretch-mode" title="Auto : noir, balance des blancs et force de la courbe déduits de l'image à chaque aperçu (arcsinh à couleurs préservées). Manuel : réglages historiques.">Étirement</label>
+      <select id="stretch-mode">
+        <option value="auto" selected>Auto</option>
+        <option value="manual">Manuel</option>
+      </select>
+    </div>
+    <div id="auto-rows">
+    <div class="range-row">
+      <label for="stretch-target" title="Luminosité du fond de ciel à l'écran. Auto : de 10 % au début, quand le stack est encore bruité, à 18 % quand le bruit a baissé">Fond <span class="input-hint">(luminosité)</span></label>
+      <input type="range" id="stretch-target" min="5" max="30" step="1" value="18">
+      <span class="range-val" id="stretch-target-val">auto</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="stretch-target-auto">Fond automatique</label>
+      <input type="checkbox" id="stretch-target-auto" checked style="width:auto;">
+    </div>
+    </div>
+    <div id="manual-rows" class="hidden">
     <div class="range-row">
       <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
       <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
@@ -114,14 +133,24 @@
       <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
     </div>
+    <div class="control-row control-row--inline">
+      <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
+      <input type="checkbox" id="bg-neutral" checked style="width:auto;">
+    </div>
+    </div>
+    <div class="range-row">
+      <label for="local-contrast" title="Renforce les structures larges (bras, bandes de poussière) sans brûler les zones brillantes ; 0 = désactivé. Auto et Manuel">Contraste local</label>
+      <input type="range" id="local-contrast" min="0" max="150" step="5" value="80">
+      <span class="range-val" id="local-contrast-val">80 %</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="remove-green" title="Retire l'excès de vert (SCNR neutre moyen) : dominante verte du capteur ou du ciel ; le FITS reste brut">Retirer le vert</label>
+      <input type="checkbox" id="remove-green" checked style="width:auto;">
+    </div>
     <div class="range-row">
       <label for="saturation">Saturation <span class="input-hint">(couleurs)</span></label>
       <input type="range" id="saturation" min="0" max="300" step="5" value="100">
       <span class="range-val" id="saturation-val">100 %</span>
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
-      <input type="checkbox" id="bg-neutral" checked style="width:auto;">
     </div>
     <div class="button-row">
       <button id="btn-start" class="btn-green">▶ Démarrer</button>
@@ -303,6 +332,68 @@ elSaturation.addEventListener('input', () => {
 });
 elBgNeutral.addEventListener('change', () => view()?.setBgNeutral(elBgNeutral.checked));
 
+// Étirement Auto / Manuel (choix mémorisés dans ce navigateur)
+const elStretchMode   = document.getElementById('stretch-mode');
+const elTarget        = document.getElementById('stretch-target');
+const elTargetVal     = document.getElementById('stretch-target-val');
+const elTargetAuto    = document.getElementById('stretch-target-auto');
+const elLocalContrast = document.getElementById('local-contrast');
+const elRemoveGreen   = document.getElementById('remove-green');
+const store = {
+    get(k) { try { return localStorage.getItem('live.' + k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem('live.' + k, v); } catch {} },
+};
+if (store.get('stretchMode')) elStretchMode.value = store.get('stretchMode');
+if (store.get('stretchTarget')) elTarget.value = store.get('stretchTarget');
+if (store.get('targetAuto')) elTargetAuto.checked = store.get('targetAuto') === '1';
+const elLocalContrastVal = document.getElementById('local-contrast-val');
+if (store.get('localContrastAmount')) elLocalContrast.value = store.get('localContrastAmount');
+else if (store.get('localContrast') === '0') elLocalContrast.value = 0;   // ancienne case décochée
+const lcAmount = () => parseInt(elLocalContrast.value) / 100;
+const showLc = () => { elLocalContrastVal.textContent = elLocalContrast.value === '0' ? 'non' : elLocalContrast.value + ' %'; };
+showLc();
+if (store.get('removeGreen')) elRemoveGreen.checked = store.get('removeGreen') === '1';
+const stretchTarget = () => elTargetAuto.checked ? null : parseInt(elTarget.value) / 100;
+function showTarget() {
+    const p = view()?.lastAutoStretch;
+    if (elTargetAuto.checked)
+        elTargetVal.textContent = p ? `auto ${Math.round(p.target * 100)} %` : 'auto';
+    else elTargetVal.textContent = elTarget.value + ' %';
+}
+function syncStretchUi() {
+    const auto = elStretchMode.value === 'auto';
+    document.getElementById('auto-rows').classList.toggle('hidden', !auto);
+    document.getElementById('manual-rows').classList.toggle('hidden', auto);
+    showTarget();
+}
+syncStretchUi();
+elStretchMode.addEventListener('change', () => {
+    store.set('stretchMode', elStretchMode.value);
+    syncStretchUi();
+    view()?.setStretchMode(elStretchMode.value);
+});
+elTarget.addEventListener('input', () => {
+    // déplacer le curseur passe en fond manuel
+    elTargetAuto.checked = false;
+    store.set('stretchTarget', elTarget.value); store.set('targetAuto', '0');
+    showTarget();
+    view()?.setStretchTarget(stretchTarget());
+});
+elTargetAuto.addEventListener('change', () => {
+    store.set('targetAuto', elTargetAuto.checked ? '1' : '0');
+    showTarget();
+    view()?.setStretchTarget(stretchTarget());
+});
+elLocalContrast.addEventListener('input', () => {
+    store.set('localContrastAmount', elLocalContrast.value);
+    showLc();
+    view()?.setLocalContrast(lcAmount());
+});
+elRemoveGreen.addEventListener('change', () => {
+    store.set('removeGreen', elRemoveGreen.checked ? '1' : '0');
+    view()?.setRemoveGreen(elRemoveGreen.checked);
+});
+
 function updateStats() {
     const v = view();
     const sc = v?.stackedCount ?? 0;
@@ -359,6 +450,10 @@ btnStart.addEventListener('click', async () => {
             stretchBeta: parseFloat(elStretchBeta.value),
             saturation:  parseInt(elSaturation.value) / 100,
             bgNeutral:   elBgNeutral.checked,
+            stretchMode:   elStretchMode.value,
+            stretchTarget: stretchTarget(),
+            localContrast: lcAmount(),
+            removeGreen:   elRemoveGreen.checked,
             // Alignement sur les étoiles : détection + triangles + rotation/translation (dso_stacker.js)
             // Case décochée : même empilement ciel profond, sans recalage
             // (monture guidée) — pixels chauds, verts, bruit de ligne, rejet σ inclus.
@@ -374,6 +469,7 @@ btnStart.addEventListener('click', async () => {
     });
 
     stacker.addEventListener('preview', () => {
+        showTarget();
         placeholder.style.display = 'none';
         btnSavePng.disabled  = false;
         btnSaveFits.disabled = false;
