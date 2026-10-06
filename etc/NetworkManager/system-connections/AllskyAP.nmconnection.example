@@ -13,6 +13,9 @@ ssid=AllskyCam
 
 [wifi-security]
 key-mgmt=wpa-psk
+proto=rsn
+pairwise=ccmp
+group=ccmp
 psk=CHANGE_ME
 
 [ipv4]

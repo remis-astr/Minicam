@@ -85,6 +85,9 @@ ssid={ssid}
 
 [wifi-security]
 key-mgmt=wpa-psk
+proto=rsn
+pairwise=ccmp
+group=ccmp
 psk={psk}
 
 [ipv4]
