@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Génère la configuration réseau du Pi à partir de /etc/minicam/config.toml.
+
+Lancé par minicam-net-init.service à chaque démarrage, avant NetworkManager
+et dnsmasq : une carte fraîchement installée a donc son hotspot et son DHCP
+USB dès le premier démarrage, et modifier config.toml suffit (puis reboot).
+
+[wifi]    ap_ssid, ap_psk          -> profil NetworkManager MulticamAP
+[network] usb_ip                   -> /etc/dnsmasq.d/minicam-usb.conf
+                                      /run/minicam/net.env (route-watch)
+                                      /run/minicam/m8s-forward.nft (relais M8S)
+
+L'hôte USB (PC ou M8S) est toujours en .1 du même /24 que usb_ip.
+Si un autre profil en mode AP existe déjà (ex. AllskyAP créé à la main), il
+est laissé tel quel et MulticamAP n'est pas généré.
+"""
+from __future__ import annotations
+
+import ipaddress
+import sys
+import tomllib
+import uuid
+from pathlib import Path
+
+CONFIG_PATH = Path("/etc/minicam/config.toml")
+NM_DIR = Path("/etc/NetworkManager/system-connections")
+AP_PROFILE = NM_DIR / "MulticamAP.nmconnection"
+DNSMASQ_USB = Path("/etc/dnsmasq.d/minicam-usb.conf")
+RUN_DIR = Path("/run/minicam")
+
+DEFAULT_SSID = "MULTICAM"
+DEFAULT_PSK = "multicam"
+DEFAULT_USB_IP = "192.168.7.3"
+AP_ADDRESS = "192.168.4.1/24"  # plage DHCP : etc/dnsmasq.d/allsky-ap.conf
+
+
+def _load_config() -> dict:
+    try:
+        with CONFIG_PATH.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        print(f"config.toml illisible ({e}), valeurs par défaut", file=sys.stderr)
+        return {}
+
+
+def _other_ap_profile() -> Path | None:
+    for p in NM_DIR.glob("*.nmconnection"):
+        if p == AP_PROFILE:
+            continue
+        try:
+            text = p.read_text()
+        except OSError:
+            continue
+        if "\nmode=ap" in text:
+            return p
+    return None
+
+
+def write_ap_profile(wifi: dict) -> None:
+    other = _other_ap_profile()
+    if other is not None:
+        print(f"profil AP existant ({other.name}), MulticamAP non généré")
+        return
+    ssid = str(wifi.get("ap_ssid", DEFAULT_SSID))
+    psk = str(wifi.get("ap_psk", DEFAULT_PSK))
+    if not 8 <= len(psk) <= 63:
+        print(f"ap_psk doit faire 8 à 63 caractères, '{DEFAULT_PSK}' utilisé", file=sys.stderr)
+        psk = DEFAULT_PSK
+    # UUID stable : NetworkManager garde le même profil d'un démarrage à l'autre.
+    conn_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, "minicam-ap")
+    AP_PROFILE.parent.mkdir(parents=True, exist_ok=True)
+    AP_PROFILE.write_text(f"""[connection]
+id=MulticamAP
+uuid={conn_uuid}
+type=wifi
+autoconnect-priority=20
+interface-name=wlan0
+
+[wifi]
+band=bg
+mode=ap
+ssid={ssid}
+
+[wifi-security]
+key-mgmt=wpa-psk
+proto=rsn
+pairwise=ccmp
+group=ccmp
+psk={psk}
+
+[ipv4]
+address1={AP_ADDRESS}
+method=manual
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+
+[proxy]
+""")
+    AP_PROFILE.chmod(0o600)
+    print(f"hotspot '{ssid}' ({AP_ADDRESS})")
+
+
+def write_usb_config(network: dict) -> None:
+    usb_ip = str(network.get("usb_ip", DEFAULT_USB_IP))
+    try:
+        iface = ipaddress.IPv4Interface(f"{usb_ip}/24")
+    except ValueError:
+        print(f"usb_ip invalide ({usb_ip!r}), {DEFAULT_USB_IP} utilisé", file=sys.stderr)
+        iface = ipaddress.IPv4Interface(f"{DEFAULT_USB_IP}/24")
+    net = iface.network
+    host_ip = net.network_address + 1
+    first, last = net.network_address + 10, net.network_address + 20
+
+    DNSMASQ_USB.write_text(f"""# Généré par minicam-net-init depuis /etc/minicam/config.toml — ne pas éditer
+# DHCP sur interfaces USB gadget uniquement (RNDIS=usb0, ECM=usb1)
+interface=usb0
+interface=usb1
+dhcp-range=usb0,{first},{last},255.255.255.0,1h
+dhcp-range=usb1,{first},{last},255.255.255.0,1h
+dhcp-option=3  # pas de gateway
+bind-dynamic  # tolère wlan0 sans IP ; bind-interfaces faisait échouer dnsmasq
+""")
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    (RUN_DIR / "net.env").write_text(
+        f"USB_IP={iface.ip}\nUSB_NET={net}\nHOST_IP={host_ip}\n"
+    )
+    (RUN_DIR / "m8s-forward.nft").write_text(
+        Path("/etc/minicam/m8s-forward.nft").read_text().replace("192.168.7.1", str(host_ip))
+    )
+    print(f"USB {iface.ip}/24, hôte {host_ip}, DHCP {first}-{last}")
+
+
+def main() -> int:
+    cfg = _load_config()
+    write_ap_profile(cfg.get("wifi", {}))
+    write_usb_config(cfg.get("network", {}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

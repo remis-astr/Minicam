@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lucky Stack — MiniCam</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.stack-section {
+  width: 100%; max-width: 800px;
+  display: flex; flex-direction: column; gap: 1rem;
+  border: 1px solid #2a4a2a; border-radius: 6px; padding: 1rem;
+  background: #161e16;
+}
+.stats {
+  font-size: 0.85rem; color: #8bb; font-family: monospace;
+  min-height: 2.4em; line-height: 1.7; white-space: pre;
+}
+.gpu-warn {
+  background: #3a2a10; border: 1px solid #6a4a20; border-radius: 4px;
+  padding: 0.75rem; font-size: 0.8rem; color: #da8; line-height: 1.4;
+}
+.range-row {
+  display: flex; align-items: center; gap: 0.75rem;
+}
+.range-row label { flex: 1; font-size: 0.85rem; color: #aaa; }
+.range-row input[type=range] { flex: 2; accent-color: #48a; }
+.range-val { width: 3.5rem; text-align: right; font-size: 0.85rem; color: #ddd; flex-shrink: 0; }
+.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
+.back-link:hover { color: #adf; }
+.btn-green  { background: #2a5a2a; }
+.btn-green:hover:not(:disabled) { background: #3a7a3a; }
+.btn-orange { background: #6a4a10; }
+.btn-orange:hover:not(:disabled) { background: #9a6a18; }
+/* La preview-box s'adapte au canvas (pas de 16/9 forcé) */
+#preview-box { aspect-ratio: unset; height: auto; min-height: 200px; }
+#stack-canvas { display: block; width: 100%; height: auto; }
+#preview-box:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
+#preview-box:fullscreen #stack-canvas { width: auto; max-width: 100vw; max-height: 100vh; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/" class="back-link">← MiniCam</a>
+  <h1>Lucky Stack</h1>
+  <span id="ws-status" class="badge disconnected">Déconnecté</span>
+</header>
+
+<main>
+  <div id="gpu-warn" class="gpu-warn hidden">
+    WebGPU indisponible — calculs sur le processeur (plus lent).<br>
+    <span id="gpu-reason"></span>
+  </div>
+
+  <section class="preview-box" id="preview-box">
+    <canvas id="stack-canvas"></canvas>
+    <span id="preview-placeholder" style="position:absolute;color:#555;font-size:0.85rem;">En attente de frames…</span>
+    <button id="btn-fullscreen" class="overlay-btn" title="Plein écran">⛶</button>
+  </section>
+
+  <!-- Camera controls -->
+  <section class="controls">
+    <h3 class="section-title">Paramètres caméra</h3>
+    <div class="control-row control-row--inline">
+      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
+      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" value="8">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
+      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" value="100">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="sync-camera">Appliquer à la caméra</label>
+      <input type="checkbox" id="sync-camera" checked style="width:auto;">
+    </div>
+  </section>
+
+  <!-- Stack controls -->
+  <section class="stack-section">
+    <h3 class="section-title">Lucky Stack</h3>
+
+    <div class="control-row control-row--inline">
+      <label for="format-select">Format</label>
+      <select id="format-select">
+        <option value="raw" selected>RAW (Bayer, précis)</option>
+        <option value="jpeg">JPEG (ISP, léger)</option>
+        <option value="png">PNG (ISP, sans perte)</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline" id="bitdepth-row">
+      <label for="bitdepth-select">Profondeur</label>
+      <select id="bitdepth-select">
+        <option value="16" selected>16-bit (qualité)</option>
+        <option value="8">8-bit (débit ×2)</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline" id="compression-row">
+      <label for="compression-select">Compression</label>
+      <select id="compression-select">
+        <option value="none" selected>Aucune</option>
+        <option value="zstd">zstd (sans perte)</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+      <select id="mode-select"><option value="">—</option></select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
+      <select id="roi-select">
+        <option value="full" selected>Plein champ</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="selection-select" title="Fenêtre glissante : chaque image est comparée aux 50 dernières, une image empilée le reste. Pool élite : le stack contient toujours les N images les plus nettes de toute la session ; une meilleure remplace la pire, retirée exactement du stack.">Sélection</label>
+      <select id="selection-select">
+        <option value="window" selected>Fenêtre glissante</option>
+        <option value="elite">Pool élite</option>
+      </select>
+    </div>
+
+    <div class="range-row" id="quality-row">
+      <label for="quality-slider">Meilleures frames <span class="input-hint">(des 50 dernières)</span></label>
+      <input type="range" id="quality-slider" min="1" max="50" step="1" value="10">
+      <span class="range-val" id="quality-val">10 %</span>
+    </div>
+
+    <div class="range-row hidden" id="pool-row">
+      <label for="pool-size">Taille du pool <span class="input-hint">(meilleures images de la session)</span></label>
+      <input type="range" id="pool-size" min="10" max="1000" step="10" value="200">
+      <span class="range-val" id="pool-size-val">200</span>
+    </div>
+    <div class="input-hint hidden" id="pool-mem" style="margin:-4px 0 6px;"></div>
+
+    <div class="control-row control-row--inline">
+      <label for="align-mode">Alignement</label>
+      <select id="align-mode">
+        <option value="none">OFF</option>
+        <option value="on" selected>ON</option>
+      </select>
+    </div>
+
+    <div class="range-row" id="align-radius-row">
+      <label for="align-radius">Rayon recherche</label>
+      <input type="range" id="align-radius" min="8" max="256" step="8" value="32">
+      <span class="range-val" id="align-radius-val">32 px</span>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="awb-toggle">Balance des blancs auto <span class="input-hint">(sur l'image stackée)</span></label>
+      <input type="checkbox" id="awb-toggle" checked style="width:auto;">
+    </div>
+
+    <div class="range-row">
+      <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
+      <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+      <span class="range-val" id="stretch-lo-val">0.1 %</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
+      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+      <span class="range-val" id="stretch-beta-val">0</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
+      <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
+      <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+
+    <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter), ou en direct si coché ; aperçu et PNG, le FITS reste brut</div>
+    <div class="control-row control-row--inline">
+      <label for="post-live" title="Applique ondelettes, débruitage et CLAHE à chaque aperçu pendant l'empilement (calcul sur le processeur, ~0,1–0,3 s par aperçu : aperçu un peu moins fluide)">Accentuation en direct</label>
+      <input type="checkbox" id="post-live" style="width:auto;">
+    </div>
+
+    <div class="range-row">
+      <label for="wav-1">Ondelettes 1 <span class="input-hint">(détail fin)</span></label>
+      <input type="range" id="wav-1" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-1-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-2">Ondelettes 2 <span class="input-hint">(moyen)</span></label>
+      <input type="range" id="wav-2" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-2-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-3">Ondelettes 3 <span class="input-hint">(large)</span></label>
+      <input type="range" id="wav-3" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-3-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-4">Ondelettes 4 <span class="input-hint">(très large)</span></label>
+      <input type="range" id="wav-4" min="0" max="10" step="0.1" value="0">
+      <span class="range-val" id="wav-4-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="wav-denoise">Débruitage <span class="input-hint">(couche 1, × bruit)</span></label>
+      <input type="range" id="wav-denoise" min="0" max="3" step="0.1" value="0">
+      <span class="range-val" id="wav-denoise-val">0</span>
+    </div>
+
+    <div class="range-row">
+      <label for="contrast">Contraste <span class="input-hint">(courbe en S)</span></label>
+      <input type="range" id="contrast" min="0" max="100" step="1" value="0">
+      <span class="range-val" id="contrast-val">0 %</span>
+    </div>
+
+    <div class="range-row">
+      <label for="clahe">CLAHE <span class="input-hint">(contraste local)</span></label>
+      <input type="range" id="clahe" min="0" max="100" step="1" value="0">
+      <span class="range-val" id="clahe-val">0 %</span>
+    </div>
+
+    <div class="range-row">
+      <label for="saturation">Saturation <span class="input-hint">(couleurs, en direct)</span></label>
+      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+      <span class="range-val" id="saturation-val">100 %</span>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="ser-file" title="Rejoue un fichier SER local à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Test SER</label>
+      <input type="file" id="ser-file" accept=".ser">
+      <button id="ser-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
+    </div>
+
+    <div class="button-row">
+      <button id="btn-start" class="btn-green">▶ Démarrer</button>
+      <button id="btn-stop" class="hidden">■ Arrêter</button>
+      <button id="btn-reset" disabled>↺ Reset</button>
+    </div>
+
+    <div class="button-row">
+      <button id="btn-save-png" disabled>⬇ PNG</button>
+      <button id="btn-save-fits" disabled>⬇ FITS</button>
+    </div>
+
+    <div id="stats" class="stats">—</div>
+  </section>
+</main>
+
+<script type="module">
+import { StreamingStacker } from './stacker.js';
+import { SerFileSource, readSerHeader } from './ser_file_source.js';
+import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
+         fillModeSelect, fillRoiSelect, parseRoi, ROI_CHOICES } from './ui_common.js';
+
+const WS_RAW = wsUrl('/ws/raw');
+
+const canvas       = document.getElementById('stack-canvas');
+const placeholder  = document.getElementById('preview-placeholder');
+const elStatus     = document.getElementById('ws-status');
+const elStats      = document.getElementById('stats');
+const elGain       = document.getElementById('gain-input');
+const elExpo       = document.getElementById('expo-input');
+const elSync       = document.getElementById('sync-camera');
+const elFormat     = document.getElementById('format-select');
+const elBitDepthRow = document.getElementById('bitdepth-row');
+const elQuality    = document.getElementById('quality-slider');
+const elQualityVal = document.getElementById('quality-val');
+const elAlignMode  = document.getElementById('align-mode');
+const elAwb        = document.getElementById('awb-toggle');
+const elStretchLo    = document.getElementById('stretch-lo');
+const elStretchLoVal = document.getElementById('stretch-lo-val');
+const elStretchBeta  = document.getElementById('stretch-beta');
+const elStretchBetaVal = document.getElementById('stretch-beta-val');
+const elStretchHi    = document.getElementById('stretch-hi');
+const elStretchHiVal = document.getElementById('stretch-hi-val');
+const btnStart     = document.getElementById('btn-start');
+const elWav        = [1, 2, 3, 4].map((j) => document.getElementById(`wav-${j}`));
+const elWavDenoise = document.getElementById('wav-denoise');
+const elContrast   = document.getElementById('contrast');
+const elClahe      = document.getElementById('clahe');
+const elSaturation = document.getElementById('saturation');
+// Accentuation en direct : choix gardé d'une visite à l'autre
+const elPostLive = document.getElementById('post-live');
+try { elPostLive.checked = localStorage.getItem('lucky.postLive') === '1'; } catch {}
+elPostLive.addEventListener('change', () => {
+    try { localStorage.setItem('lucky.postLive', elPostLive.checked ? '1' : '0'); } catch {}
+    view()?.setPostLive(elPostLive.checked);
+});
+const postValues = () => ({
+    wavelets:       elWav.map((e) => parseFloat(e.value)),
+    waveletDenoise: parseFloat(elWavDenoise.value),
+    contrast:       parseInt(elContrast.value) / 100,
+    clahe:          parseInt(elClahe.value) / 100,
+    saturation:     parseInt(elSaturation.value) / 100,
+});
+for (const el of [...elWav, elWavDenoise, elContrast, elClahe, elSaturation]) {
+    el.addEventListener('input', () => {
+        document.getElementById(`${el.id}-val`).textContent =
+            el.value + (el === elContrast || el === elClahe || el === elSaturation ? ' %' : '');
+        const s = view();
+        if (!s) return;
+        const v = postValues();
+        s.setWavelets(v.wavelets, v.waveletDenoise);
+        s.setContrast(v.contrast);
+        s.setClahe(v.clahe);
+        s.setSaturation(v.saturation);
+    });
+}
+const btnStop      = document.getElementById('btn-stop');
+const btnReset     = document.getElementById('btn-reset');
+const btnSavePng   = document.getElementById('btn-save-png');
+const btnSaveFits  = document.getElementById('btn-save-fits');
+const elSerFile    = document.getElementById('ser-file');
+const btnSerClear  = document.getElementById('ser-clear');
+
+elSerFile.addEventListener('change', async () => {
+    // pool élite : une image SER est conservée telle que lue (Bayer 8/16 bits ou RGBA 8 bits)
+    serInfo = null;
+    const f = elSerFile.files[0];
+    if (f) {
+        try {
+            const h = await readSerHeader(f);
+            serInfo = { w: h.width, h: h.height, bpp: h.bayer ? h.bytesPx : 4 };
+        } catch {}
+    }
+    updateSelectionUi();
+    btnSerClear.classList.toggle('hidden', !elSerFile.files.length);
+});
+btnSerClear.addEventListener('click', () => {
+    elSerFile.value = '';
+    btnSerClear.classList.add('hidden');
+    serInfo = null;
+    updateSelectionUi();
+});
+
+let stacker   = null;
+// Dernier stack arrêté : reste affiché et réglable (ondelettes, étirement, export).
+let lastStacker = null;
+const view = () => stacker ?? lastStacker;
+let totalSeen = 0;
+let accepted  = 0;
+
+
+// GPU check
+detectGpu().then(({ ok, reason }) => {
+    if (!ok) {
+        document.getElementById('gpu-warn').classList.remove('hidden');
+        document.getElementById('gpu-reason').textContent = reason;
+    }
+});
+
+// Camera WS
+const ctrlWs = new ControlWs();
+ctrlWs.onStatus = (msg) => {
+    if (msg.raw_modes_info) fillModes(msg.raw_modes_info, msg.raw_mode);
+    else if (msg.cmd === 'ack' && msg.raw_mode) ctrlWs.requestStatus();   // mode changé : dimensions à jour
+    if (msg.gain !== undefined) elGain.value = parseFloat(msg.gain).toFixed(1);
+    if (msg.exposure_ms !== undefined) elExpo.value = parseFloat(msg.exposure_ms).toFixed(1);
+    elStatus.className  = 'badge connected';
+    elStatus.textContent = 'Connecté';
+};
+ctrlWs.onError = () => {
+    elStatus.className  = 'badge disconnected';
+    elStatus.textContent = 'WS erreur';
+};
+ctrlWs.connect();
+
+// Sync gain/expo to camera when changed (if checkbox checked)
+elGain.addEventListener('change', () => {
+    if (elSync.checked) ctrlWs.setGain(parseFloat(elGain.value));
+    if (stacker) stacker.flush(3);
+});
+elExpo.addEventListener('change', () => {
+    if (elSync.checked) ctrlWs.setExposure(parseFloat(elExpo.value));
+    if (stacker) stacker.flush(3);
+});
+
+// Sélection : fenêtre glissante (curseur %) ou pool élite (curseur taille)
+const elSelection = document.getElementById('selection-select');
+const elPoolSize  = document.getElementById('pool-size');
+const elPoolVal   = document.getElementById('pool-size-val');
+const elPoolMem   = document.getElementById('pool-mem');
+try {
+    const sel = localStorage.getItem('lucky.selection'), n = localStorage.getItem('lucky.poolSize');
+    if (sel === 'elite' || sel === 'window') elSelection.value = sel;
+    if (n) elPoolSize.value = n;
+} catch {}
+// Mémoire du pool : une copie de l'image d'origine par membre (ROI, profondeur)
+const POOL_BUDGET = Math.min(1536, ((navigator.deviceMemory ?? 4) * 1024) / 4) * 2 ** 20;
+let modeSize = null;   // [w, h] du mode capteur courant (statut caméra)
+let serInfo = null;    // fichier SER choisi : { w, h, bpp } de l'image conservée
+function frameBytes() {
+    if (serInfo) return serInfo.w * serInfo.h * serInfo.bpp;
+    const roi = parseRoi(elRoi.value);
+    const [w, h] = roi ?? modeSize ?? [640, 480];
+    const fmt = elFormat.value;
+    const bpp = fmt === 'raw' ? (parseInt(elBitDepth.value) === 8 ? 1 : 2) : fmt === 'png' ? 1.5 : 0.3;
+    return w * h * bpp;
+}
+function poolCapacity(n) { return Math.max(10, Math.min(n, Math.floor(POOL_BUDGET / frameBytes()))); }
+function updateSelectionUi() {
+    const elite = elSelection.value === 'elite';
+    document.getElementById('quality-row').classList.toggle('hidden', elite);
+    document.getElementById('pool-row').classList.toggle('hidden', !elite);
+    elPoolMem.classList.toggle('hidden', !elite);
+    const n = parseInt(elPoolSize.value), cap = poolCapacity(n);
+    elPoolVal.textContent = n;
+    const mb = (cap * frameBytes() / 2 ** 20).toFixed(0);
+    elPoolMem.textContent = cap < n
+        ? `Mémoire limitée : pool ramené à ${cap} images (~${mb} Mo)`
+        : `Mémoire du pool : ~${mb} Mo (copie des images retenues)`;
+}
+elSelection.addEventListener('change', () => {
+    try { localStorage.setItem('lucky.selection', elSelection.value); } catch {}
+    updateSelectionUi();
+});
+elPoolSize.addEventListener('input', () => {
+    try { localStorage.setItem('lucky.poolSize', elPoolSize.value); } catch {}
+    updateSelectionUi();
+});
+
+// Range sliders
+elQuality.addEventListener('input', () => {
+    const v = parseInt(elQuality.value);
+    elQualityVal.textContent = v + ' %';
+    if (stacker) stacker._qualityThreshold = v / 100;
+});
+const elAlignRadius    = document.getElementById('align-radius');
+const elAlignRadiusVal = document.getElementById('align-radius-val');
+const elAlignRadiusRow = document.getElementById('align-radius-row');
+
+elAlignMode.addEventListener('change', () => {
+    elAlignRadiusRow.classList.toggle('hidden', elAlignMode.value === 'none');
+    if (stacker) stacker.setAlignMode(elAlignMode.value);
+});
+
+elAlignRadius.addEventListener('input', () => {
+    const v = parseInt(elAlignRadius.value);
+    elAlignRadiusVal.textContent = v + ' px';
+    if (stacker) stacker.setSearchRadius(v);
+});
+
+elAwb.addEventListener('change', () => {
+    view()?.setAWB(elAwb.checked);
+});
+
+function stretchValues() {
+    return {
+        lo:   parseFloat(elStretchLo.value)   / 100,
+        hi:   parseFloat(elStretchHi.value)   / 100,
+        beta: parseFloat(elStretchBeta.value),
+    };
+}
+elStretchLo.addEventListener('input', () => {
+    elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    view()?.setStretch(lo, hi, beta);
+});
+elStretchBeta.addEventListener('input', () => {
+    const v = parseFloat(elStretchBeta.value);
+    elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
+    view()?.setStretchBeta(v);
+});
+elStretchHi.addEventListener('input', () => {
+    elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    view()?.setStretch(lo, hi, beta);
+});
+
+const elBitDepth = document.getElementById('bitdepth-select');
+elBitDepth.addEventListener('change', () => {
+    if (stacker) {
+        stacker._receiver?.setBitDepth(parseInt(elBitDepth.value));
+        stacker.flush(3);
+        if (stacker._initialized) stacker.reset();
+    }
+});
+
+// Compression sans perte du RAW (zstd) : gain ×3 environ sur une planète
+// sur fond noir, faible sur une scène texturée.
+const elCompression    = document.getElementById('compression-select');
+const elCompressionRow = document.getElementById('compression-row');
+elCompression.addEventListener('change', () => stacker?.setCompression(elCompression.value));
+
+function updateRawRows() {
+    elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
+    elCompressionRow.classList.toggle('hidden', elFormat.value !== 'raw');
+}
+elFormat.addEventListener('change', () => {
+    updateRawRows();
+    if (stacker) stacker.setFormat(elFormat.value);
+});
+updateRawRows();
+
+// Mode capteur et ROI (mêmes listes que Live Stack, recadrages planétaires)
+const elMode = document.getElementById('mode-select');
+function fillModes(info, current) {
+    fillModeSelect(elMode, info, current);
+    const cur = info.find((m) => m.name === current);
+    if (cur) {
+        modeSize = [cur.width, cur.height];
+        fillRoiSelect(elRoi, cur.width, cur.height, ROI_CHOICES.lucky);
+        updateSelectionUi();
+    }
+}
+elMode.addEventListener('change', () => { if (elMode.value) ctrlWs.setMode(elMode.value); });
+
+const elRoi = document.getElementById('roi-select');
+elRoi.addEventListener('change', () => {
+    if (stacker) {
+        const roi = parseRoi(elRoi.value);
+        stacker.setRoi(roi?.[0] ?? null, roi?.[1] ?? null);
+    }
+});
+// estimation mémoire du pool : dépend du ROI, de la profondeur et du format
+for (const el of [elRoi, elBitDepth, elFormat]) el.addEventListener('change', updateSelectionUi);
+updateSelectionUi();
+
+function updateStats() {
+    const el = view()?.eliteStats;
+    if (el) {
+        const v = view();
+        const expS  = v._totalExpMs > 0 ? (v._totalExpMs / 1000).toFixed(1) : '—';
+        elStats.textContent =
+            `Pool élite : ${el.size} / ${el.capacity} images  |  vues : ${totalSeen}\n` +
+            `Score : ${v.lastSharpness.toFixed(4)}  |  Seuil du pool : ${el.minScore.toFixed(4)}\n` +
+            `Remplacements : ${el.replaced}  |  Mémoire : ${(el.bytes / 2 ** 20).toFixed(0)} Mo  |  Exposition : ${expS} s`;
+        return;
+    }
+    const sc     = stacker?.stackedCount ?? 0;
+    const rate   = totalSeen > 0 ? (accepted / totalSeen * 100).toFixed(1) : '0.0';
+    const score  = stacker ? stacker.lastSharpness.toFixed(4) : '—';
+    const thresh = (stacker?.currentThreshold ?? 0).toFixed(4);
+    const expS   = stacker?._totalExpMs > 0 ? (stacker._totalExpMs / 1000).toFixed(1) : '—';
+    const gainM  = stacker?._stackedCount > 0 ? (stacker._gainSum / stacker._stackedCount).toFixed(1) : '—';
+    elStats.textContent =
+        `Acceptées : ${sc} / ${totalSeen}  (${rate} %)\n` +
+        `Score : ${score}  |  Seuil adaptatif : ${thresh}\n` +
+        `Exposition : ${expS} s  |  Gain moy. : ${gainM}`;
+}
+
+// Start stacking
+btnStart.addEventListener('click', async () => {
+    // Un stack déjà en cours (double clic…) serait orphelin : flux /ws/raw et
+    // workers continueraient sans pouvoir être arrêtés.
+    if (stacker) { stacker.stop(); stacker = null; }
+    btnStart.classList.add('hidden');
+    btnStop.classList.remove('hidden');
+    btnReset.disabled    = true;
+    btnSavePng.disabled  = true;
+    btnSaveFits.disabled = true;
+    placeholder.style.display = '';
+    totalSeen = 0; accepted = 0;
+    updateStats();
+    elStatus.className   = 'badge connecting';
+    elStatus.textContent = 'Connexion flux…';
+
+    elAlignMode.disabled   = true;
+    elAlignRadius.disabled = true;
+    elBitDepth.disabled    = true;
+    elRoi.disabled         = true;
+    elMode.disabled        = true;
+    elFormat.disabled      = true;
+    elSelection.disabled   = true;
+    elPoolSize.disabled    = true;
+    lastStacker = null;
+    stacker = new StreamingStacker({
+        mode:    'lucky',
+        canvas,
+        options: {
+            qualityThreshold: parseInt(elQuality.value) / 100,
+            selection:        elSelection.value,
+            poolSize:         poolCapacity(parseInt(elPoolSize.value)),
+            alignMode:        elAlignMode.value,
+            searchRadius:     parseInt(elAlignRadius.value),
+            bitDepth:         parseInt(elBitDepth.value),
+            roi:              parseRoi(elRoi.value),
+            format:           elFormat.value,
+            compression:      elCompression.value,
+            awb:              elAwb.checked,
+            stretchLow:       parseFloat(elStretchLo.value) / 100,
+            stretchHigh:      parseFloat(elStretchHi.value) / 100,
+            stretchBeta:      parseFloat(elStretchBeta.value),
+            ...postValues(),
+            postLive:         elPostLive.checked,
+            // Pas de cadence fixe : le Pi envoie au maximum, régulé par un
+            // buffer de 8 images (aucune image perdue en Lucky Stack).
+            flowCredits:      8,
+        },
+    });
+
+    stacker.addEventListener('frame', (ev) => {
+        totalSeen++;
+        if (ev.detail.accepted) accepted++;
+        updateStats();
+    });
+
+    stacker.addEventListener('preview', () => {
+        updateStats();   // compteurs après empilement (l'événement 'frame' les précède)
+        placeholder.style.display = 'none';
+        btnSavePng.disabled  = false;
+        btnSaveFits.disabled = false;
+    });
+
+    stacker.addEventListener('error', (ev) => {
+        elStats.textContent = 'Erreur : ' + ev.detail.message;
+    });
+
+    const serFile = elSerFile.files[0];
+    const source = serFile
+        ? new SerFileSource(serFile, {
+            onProgress: (i, n) => { elStatus.textContent = `SER ${i} / ${n}`; },
+            onEnd: () => {
+                elStatus.className   = 'badge disconnected';
+                elStatus.textContent = 'SER terminé';
+                stacker?.finish().then(updateStats);
+            },
+        })
+        : WS_RAW;
+    elSerFile.disabled = true;
+    try {
+        await stacker.start(source);
+        elStatus.className   = 'badge connected';
+        elStatus.textContent = serFile ? 'Lecture SER' : 'Flux actif';
+        if (serFile) {
+            const h = source.header;
+            console.log(`[SER] ${serFile.name} : ${h.width}×${h.height}, ${h.depth} bits, ColorID ${h.colorId}, ${h.frames} images`);
+        }
+    } catch (e) {
+        elStats.textContent  = 'Erreur connexion : ' + e.message;
+        elStatus.className   = 'badge disconnected';
+        elStatus.textContent = 'Déconnecté';
+        _resetUI();
+    }
+});
+
+btnStop.addEventListener('click', async () => {
+    // Garder le stack : plus de nouvelles images, relecture complète du stack
+    // (finish) tant que le worker existe, puis arrêt du flux et des workers.
+    const s = stacker;
+    stacker = null;
+    if (s) {
+        s.pause();
+        try { await s.finish(); } catch (e) { console.warn('[Stack] finish:', e); }
+        s.stop();
+    }
+    lastStacker = s;
+    updateStats();
+    elAlignMode.disabled   = false;
+    elAlignRadius.disabled = false;
+    elBitDepth.disabled    = false;
+    elRoi.disabled         = false;
+    elMode.disabled        = false;
+    elFormat.disabled      = false;
+    elSelection.disabled   = false;
+    elPoolSize.disabled    = false;
+    elStatus.className   = 'badge disconnected';
+    elStatus.textContent = 'Déconnecté';
+    _resetUI();
+    btnReset.disabled = false;
+});
+
+btnReset.addEventListener('click', () => {
+    lastStacker = null;
+    totalSeen = 0; accepted = 0;
+    updateStats();
+    btnSavePng.disabled  = true;
+    btnSaveFits.disabled = true;
+    placeholder.style.display = '';
+    const ctx = canvas.getContext('2d');
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+});
+
+btnSavePng.addEventListener('click', () => {
+    savePng(canvas, `lucky_${formatDate()}.png`);
+});
+
+btnSaveFits.addEventListener('click', async () => {
+    if (!view()) return;
+    btnSaveFits.disabled = true;
+    try {
+        const result = await view().getStackResult();
+        saveFits(result, `lucky_${formatDate()}.fits`);
+    } catch (e) {
+        elStats.textContent = 'Erreur FITS : ' + e.message;
+    } finally {
+        btnSaveFits.disabled = false;
+    }
+});
+
+function _resetUI() {
+    elSerFile.disabled = false;
+    btnStart.classList.remove('hidden');
+    btnStop.classList.add('hidden');
+    btnReset.disabled = false;
+}
+
+// Plein écran
+const btnFs = document.getElementById('btn-fullscreen');
+btnFs.addEventListener('click', () => {
+    const box = document.getElementById('preview-box');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else box.requestFullscreen().catch(e => console.warn('Fullscreen:', e));
+});
+document.addEventListener('fullscreenchange', () => {
+    btnFs.textContent = document.fullscreenElement ? '⊡' : '⛶';
+});
+</script>
+</body>
+</html>

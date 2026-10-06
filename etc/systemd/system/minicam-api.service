@@ -1,0 +1,22 @@
+[Unit]
+Description=minicam API service (FastAPI + picamera2)
+After=network.target
+Conflicts=minicam-indi.service
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/minicam
+# /usr/local/lib/python3/dist-packages: Python bindings of the patched libcamera
+# (will127534 fork, in /usr/local) that knows IMX585/678/662 — not on the
+# default sys.path, so without it the Debian libcamera 0.5 would be loaded.
+Environment=PYTHONPATH=/opt/minicam/src:/usr/local/lib/python3/dist-packages
+ExecStart=/usr/bin/python3 -m minicam
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minicam-api
+
+[Install]
+WantedBy=multi-user.target

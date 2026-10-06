@@ -1,0 +1,25 @@
+#!/usr/sbin/nft -f
+# Relais téléphone (WiFi AllskyCam) -> API du M8S (lien USB), projet
+# « Mecoll M8S pro L ». Seul le port 8080 est relayé : la page servie par
+# allsky appelle http://192.168.4.1:8080/..., le noyau redirige vers le M8S
+# (192.168.7.1:8080, IP fixe côté M8S) sans aucun Python sur le Pi.
+# Tout autre trafic WiFi -> USB est refusé (le SSH du M8S reste injoignable
+# depuis le WiFi).
+table ip m8s_fwd
+delete table ip m8s_fwd
+
+table ip m8s_fwd {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "wlan0" tcp dport 8080 dnat to 192.168.7.1:8080
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname { "usb0", "usb1" } ip daddr 192.168.7.1 masquerade
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        ct status dnat accept
+    }
+}

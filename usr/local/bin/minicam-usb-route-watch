@@ -1,0 +1,22 @@
+#!/bin/bash
+# USB_NET vient de /etc/minicam/config.toml via minicam-net-init
+USB_NET=192.168.7.0/24
+[ -r /run/minicam/net.env ] && . /run/minicam/net.env
+while true; do
+    for iface in usb0 usb1; do
+        carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null)
+        if ip route show dev $iface 2>/dev/null | grep -q "$USB_NET"; then
+            has_route=1
+        else
+            has_route=0
+        fi
+        if [ "$carrier" = "1" ] && [ "$has_route" = "0" ]; then
+            ip route add $USB_NET dev $iface 2>/dev/null && \
+                logger "minicam: route ajoutée sur $iface"
+        elif [ "$carrier" != "1" ] && [ "$has_route" = "1" ]; then
+            ip route del $USB_NET dev $iface 2>/dev/null && \
+                logger "minicam: route supprimée sur $iface"
+        fi
+    done
+    sleep 2
+done

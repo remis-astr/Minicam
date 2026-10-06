@@ -1,0 +1,113 @@
+#!/bin/bash
+# minicam-tls-setup — certificats HTTPS de la Multicam (page sûre → WebGPU
+# sur téléphone/tablette).
+#
+# Autorité de certification (/etc/minicam/tls/ca.crt + ca.key, 10 ans) :
+# créée au premier lancement, ou importée avec --ca DIR pour que toutes vos
+# cartes partagent la même (un appareil n'installe alors qu'un seul
+# certificat, valable pour toutes). Puis (ré)émet le certificat
+# du serveur (server.crt + server.key, 825 jours — maximum accepté par iOS/
+# macOS) pour : localhost, 127.0.0.1, le nom d'hôte, <hôte>.local, l'IP USB
+# de /etc/minicam/config.toml, l'IP du hotspot (192.168.4.1) et les noms/IP
+# passés en arguments.
+#
+# Ré-exécuter le script réémet le certificat serveur avec la même autorité :
+# les appareils qui l'ont déjà installée n'ont rien à refaire. Supprimer
+# ca.key/ca.crt pour repartir d'une nouvelle autorité.
+#
+# ca.key est secrète : quiconque l'a peut fabriquer des certificats que vos
+# appareils accepteront. Ne jamais la mettre dans le dépôt.
+#
+# Usage : sudo minicam-tls-setup [--ca DIR] [nom-ou-ip-supplémentaire …]
+#   --ca DIR   importe l'autorité commune DIR/ca.crt + DIR/ca.key
+# Puis dans /etc/minicam/config.toml :  [api]  https_port = 8443
+# et : sudo systemctl restart minicam-api
+set -euo pipefail
+
+DIR=/etc/minicam/tls
+CONF=/etc/minicam/config.toml
+AP_IP=192.168.4.1
+HOST=$(hostname)
+
+IMPORT=
+extra=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --ca) IMPORT=${2:?--ca DIR}; shift 2 ;;
+        -h|--help) sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; exit 0 ;;
+        *) extra+=("$1"); shift ;;
+    esac
+done
+
+[ "$(id -u)" -eq 0 ] || { echo "À lancer avec sudo" >&2; exit 1; }
+mkdir -p "$DIR"
+chmod 755 "$DIR"
+
+usb_ip=$(python3 - "$CONF" <<'EOF' 2>/dev/null || true
+import sys, tomllib
+try:
+    print(tomllib.load(open(sys.argv[1], "rb")).get("network", {}).get("usb_ip", "192.168.7.3"))
+except FileNotFoundError:
+    print("192.168.7.3")
+EOF
+)
+usb_ip=${usb_ip:-192.168.7.3}
+
+# Autorité de certification : importée (--ca), ou créée une seule fois
+if [ -n "$IMPORT" ]; then
+    [ -s "$IMPORT/ca.crt" ] && [ -s "$IMPORT/ca.key" ] || { echo "$IMPORT/ca.crt ou ca.key manquant" >&2; exit 1; }
+    pub_crt=$(openssl x509 -in "$IMPORT/ca.crt" -noout -pubkey)
+    pub_key=$(openssl pkey -in "$IMPORT/ca.key" -pubout)
+    [ "$pub_crt" = "$pub_key" ] || { echo "ca.key ne correspond pas à ca.crt" >&2; exit 1; }
+    openssl x509 -in "$IMPORT/ca.crt" -noout -ext basicConstraints 2>/dev/null | grep -q "CA:TRUE" \
+        || { echo "$IMPORT/ca.crt n'est pas une autorité de certification" >&2; exit 1; }
+    if [ -s "$DIR/ca.crt" ] && ! cmp -s "$IMPORT/ca.crt" "$DIR/ca.crt"; then
+        echo "Autorité précédente remplacée : les appareils qui l'avaient installée doivent installer la nouvelle."
+    fi
+    install -m 644 "$IMPORT/ca.crt" "$DIR/ca.crt"
+    install -m 600 "$IMPORT/ca.key" "$DIR/ca.key"
+    echo "Autorité importée : $(openssl x509 -in "$DIR/ca.crt" -noout -subject)"
+elif [ ! -s "$DIR/ca.key" ] || [ ! -s "$DIR/ca.crt" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$DIR/ca.key" -out "$DIR/ca.crt" -days 3650 \
+        -subj "/O=Multicam/CN=Multicam CA" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+    chmod 600 "$DIR/ca.key"
+    echo "Nouvelle autorité de certification : $DIR/ca.crt"
+    echo "  à recopier sur vos autres cartes (sudo minicam-tls-setup --ca DIR) et à sauvegarder"
+fi
+
+# Noms couverts par le certificat serveur
+declare -A seen=()
+san=()
+add() {
+    local v=$1
+    [ -n "$v" ] && [ -z "${seen[$v]:-}" ] || return 0
+    seen[$v]=1
+    if [[ $v =~ ^[0-9.]+$ || $v == *:* ]]; then san+=("IP:$v"); else san+=("DNS:$v"); fi
+}
+for v in localhost 127.0.0.1 "$HOST" "$HOST.local" "$usb_ip" "$AP_IP" "${extra[@]}"; do add "$v"; done
+SAN=$(IFS=,; echo "${san[*]}")
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$tmp/server.key" -out "$tmp/server.csr" -subj "/O=Multicam/CN=$HOST" >/dev/null 2>&1
+cat > "$tmp/ext.cnf" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+subjectAltName=$SAN
+EOF
+openssl x509 -req -in "$tmp/server.csr" -CA "$DIR/ca.crt" -CAkey "$DIR/ca.key" \
+    -CAcreateserial -CAserial "$DIR/ca.srl" -days 825 -sha256 \
+    -extfile "$tmp/ext.cnf" -out "$tmp/server.crt" >/dev/null 2>&1
+install -m 644 "$tmp/server.crt" "$DIR/server.crt"
+# lisible par le service (utilisateur admin) — clé du serveur seulement
+install -m 640 -g "$(stat -c %G /opt/minicam 2>/dev/null || echo root)" "$tmp/server.key" "$DIR/server.key"
+
+echo "Certificat serveur : $DIR/server.crt"
+echo "  noms : $SAN"
+echo "  expire : $(openssl x509 -in "$DIR/server.crt" -noout -enddate | cut -d= -f2)"
+echo "Certificat à installer sur chaque appareil : http://<ip>:8000/ca.crt"

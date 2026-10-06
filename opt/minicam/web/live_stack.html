@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Stack — MiniCam</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.stack-section {
+  width: 100%; max-width: 800px;
+  display: flex; flex-direction: column; gap: 1rem;
+  border: 1px solid #2a4a6a; border-radius: 6px; padding: 1rem;
+  background: #161820;
+}
+.stats {
+  font-size: 0.85rem; color: #8bb; font-family: monospace;
+  min-height: 2.4em; line-height: 1.7; white-space: pre;
+}
+.gpu-warn {
+  background: #3a2a10; border: 1px solid #6a4a20; border-radius: 4px;
+  padding: 0.75rem; font-size: 0.8rem; color: #da8; line-height: 1.4;
+}
+.range-row {
+  display: flex; align-items: center; gap: 0.75rem;
+}
+.range-row label { flex: 1; font-size: 0.85rem; color: #aaa; }
+.range-row input[type=range] { flex: 2; accent-color: #48a; }
+.range-val { width: 3.5rem; text-align: right; font-size: 0.85rem; color: #ddd; flex-shrink: 0; }
+.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
+.back-link:hover { color: #adf; }
+.btn-green  { background: #2a5a2a; }
+.btn-green:hover:not(:disabled) { background: #3a7a3a; }
+/* La preview-box s'adapte au canvas (pas de 16/9 forcé) */
+#preview-box { aspect-ratio: unset; height: auto; min-height: 200px; }
+#stack-canvas { display: block; width: 100%; height: auto; }
+#preview-box:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
+#preview-box:fullscreen #stack-canvas { width: auto; max-width: 100vw; max-height: 100vh; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/" class="back-link">← MiniCam</a>
+  <h1>Live Stack</h1>
+  <span id="ws-status" class="badge disconnected">Déconnecté</span>
+</header>
+
+<main>
+  <div id="gpu-warn" class="gpu-warn hidden">
+    WebGPU indisponible — calculs sur le processeur (plus lent).<br>
+    <span id="gpu-reason"></span>
+  </div>
+
+  <section class="preview-box" id="preview-box">
+    <canvas id="stack-canvas"></canvas>
+    <span id="preview-placeholder" style="position:absolute;color:#555;font-size:0.85rem;">En attente de frames…</span>
+    <button id="btn-fullscreen" class="overlay-btn" title="Plein écran">⛶</button>
+  </section>
+
+  <!-- Camera controls -->
+  <section class="controls">
+    <h3 class="section-title">Paramètres caméra</h3>
+    <div class="control-row control-row--inline">
+      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
+      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" value="8">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
+      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" value="1000">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="sync-camera">Appliquer à la caméra</label>
+      <input type="checkbox" id="sync-camera" checked style="width:auto;">
+    </div>
+  </section>
+
+  <!-- Stack controls -->
+  <section class="stack-section">
+    <h3 class="section-title">Live Stack</h3>
+
+    <div class="control-row control-row--inline">
+      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+      <select id="mode-select"><option value="">—</option></select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
+      <select id="roi-select">
+        <option value="full" selected>Plein champ</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="align-toggle">Alignement étoiles</label>
+      <input type="checkbox" id="align-toggle" checked style="width:auto;">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="dng-files" title="Rejoue une série de fichiers locaux (DNG rpicam-still, FITS brut Bayer, mono ou RGB) à la place de la caméra (lus dans le navigateur, rien n'est envoyé au Pi)">Fichiers <span class="input-hint">(DNG, FITS)</span></label>
+      <input type="file" id="dng-files" accept=".dng,.fit,.fits,.fts" multiple>
+      <button id="dng-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
+    </div>
+
+    <div class="control-row control-row--inline">
+      <label for="stretch-mode" title="Auto : noir, balance des blancs et force de la courbe déduits de l'image à chaque aperçu (arcsinh à couleurs préservées). Manuel : réglages historiques.">Étirement</label>
+      <select id="stretch-mode">
+        <option value="auto" selected>Auto</option>
+        <option value="manual">Manuel</option>
+      </select>
+    </div>
+    <div id="auto-rows">
+    <div class="range-row">
+      <label for="stretch-target" title="Luminosité du fond de ciel à l'écran. Auto : de 10 % au début, quand le stack est encore bruité, à 18 % quand le bruit a baissé">Fond <span class="input-hint">(luminosité)</span></label>
+      <input type="range" id="stretch-target" min="5" max="30" step="1" value="18">
+      <span class="range-val" id="stretch-target-val">auto</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="stretch-target-auto">Fond automatique</label>
+      <input type="checkbox" id="stretch-target-auto" checked style="width:auto;">
+    </div>
+    </div>
+    <div id="manual-rows" class="hidden">
+    <div class="range-row">
+      <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
+      <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+      <span class="range-val" id="stretch-lo-val">0.1 %</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
+      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+      <span class="range-val" id="stretch-beta-val">0</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
+      <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
+      <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
+      <input type="checkbox" id="bg-neutral" checked style="width:auto;">
+    </div>
+    </div>
+    <div class="range-row">
+      <label for="local-contrast" title="Renforce les structures larges (bras, bandes de poussière) sans brûler les zones brillantes ; 0 = désactivé. Auto et Manuel">Contraste local</label>
+      <input type="range" id="local-contrast" min="0" max="150" step="5" value="80">
+      <span class="range-val" id="local-contrast-val">80 %</span>
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="remove-green" title="Retire l'excès de vert (SCNR neutre moyen) : dominante verte du capteur ou du ciel ; le FITS reste brut">Retirer le vert</label>
+      <input type="checkbox" id="remove-green" checked style="width:auto;">
+    </div>
+    <div class="range-row">
+      <label for="saturation">Saturation <span class="input-hint">(couleurs)</span></label>
+      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+      <span class="range-val" id="saturation-val">100 %</span>
+    </div>
+    <div class="button-row">
+      <button id="btn-start" class="btn-green">▶ Démarrer</button>
+      <button id="btn-stop" class="hidden">■ Arrêter</button>
+      <button id="btn-reset" disabled>↺ Reset</button>
+    </div>
+
+    <div class="button-row">
+      <button id="btn-save-png" disabled>⬇ PNG</button>
+      <button id="btn-save-fits" disabled>⬇ FITS</button>
+    </div>
+
+    <div id="stats" class="stats">—</div>
+  </section>
+
+  <!-- Scheduler -->
+  <section class="scheduler">
+    <h3 class="section-title">Séquence automatique</h3>
+
+    <div class="control-row control-row--inline">
+      <label for="seq-count">Frames à cumuler</label>
+      <input type="number" id="seq-count" class="number-input" min="1" max="9999" value="30">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="seq-gain">Gain séquence</label>
+      <input type="number" id="seq-gain" class="value-input" min="1" max="64" step="0.5" value="8">
+    </div>
+    <div class="control-row control-row--inline">
+      <label for="seq-expo">Exposition séquence <span class="input-hint">(ms)</span></label>
+      <input type="number" id="seq-expo" class="value-input" min="0.1" max="10000" step="0.1" value="1000">
+    </div>
+
+    <div class="button-row">
+      <button id="btn-seq-start">▶ Lancer séquence</button>
+      <button id="btn-seq-stop" class="hidden">■ Arrêter séquence</button>
+    </div>
+
+    <div class="progress-bar hidden" id="seq-progress-bar">
+      <div class="progress-fill" id="seq-progress-fill"></div>
+      <span class="progress-label" id="seq-progress-label">0 / 0</span>
+    </div>
+
+    <div id="seq-status" class="seq-status">—</div>
+  </section>
+</main>
+
+<script type="module">
+import { StreamingStacker } from './stacker.js';
+import { DngFileSource } from './dng_file_source.js';
+import { FitsFileSource } from './fits_file_source.js';
+import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
+         fillModeSelect, fillRoiSelect, parseRoi, ROI_CHOICES } from './ui_common.js';
+
+const WS_RAW = wsUrl('/ws/raw');
+
+const canvas         = document.getElementById('stack-canvas');
+const placeholder    = document.getElementById('preview-placeholder');
+const elStatus       = document.getElementById('ws-status');
+const elStats        = document.getElementById('stats');
+const elGain         = document.getElementById('gain-input');
+const elExpo         = document.getElementById('expo-input');
+const elSync         = document.getElementById('sync-camera');
+const elStretchLo    = document.getElementById('stretch-lo');
+const elStretchLoVal = document.getElementById('stretch-lo-val');
+const elStretchBeta  = document.getElementById('stretch-beta');
+const elStretchBetaVal = document.getElementById('stretch-beta-val');
+const elStretchHi    = document.getElementById('stretch-hi');
+const elStretchHiVal = document.getElementById('stretch-hi-val');
+const btnStart       = document.getElementById('btn-start');
+const btnStop        = document.getElementById('btn-stop');
+const btnReset       = document.getElementById('btn-reset');
+const btnSavePng     = document.getElementById('btn-save-png');
+const btnSaveFits    = document.getElementById('btn-save-fits');
+const elSeqCount     = document.getElementById('seq-count');
+const elSeqGain      = document.getElementById('seq-gain');
+const elSeqExpo      = document.getElementById('seq-expo');
+const btnSeqStart    = document.getElementById('btn-seq-start');
+const btnSeqStop     = document.getElementById('btn-seq-stop');
+const elSeqProgress  = document.getElementById('seq-progress-bar');
+const elSeqFill      = document.getElementById('seq-progress-fill');
+const elSeqLabel     = document.getElementById('seq-progress-label');
+const elSeqStatus    = document.getElementById('seq-status');
+
+let stacker     = null;
+// Stack arrêté, gardé pour l'affichage : les réglages d'image (étirement,
+// saturation, fond neutre) et les exports restent actifs après ■ Arrêter.
+let lastStacker = null;
+const view = () => stacker ?? lastStacker;
+let seqRunning  = false;
+
+let seqTarget   = 0;
+let seqStart    = 0;
+let seqGainSave = null;
+let seqExpoSave = null;
+
+// GPU check
+detectGpu().then(({ ok, reason }) => {
+    if (!ok) {
+        document.getElementById('gpu-warn').classList.remove('hidden');
+        document.getElementById('gpu-reason').textContent = reason;
+    }
+});
+
+// Camera WS
+const ctrlWs = new ControlWs();
+ctrlWs.onStatus = (msg) => {
+    if (msg.raw_modes_info) fillModes(msg.raw_modes_info, msg.raw_mode);
+    else if (msg.cmd === 'ack' && msg.raw_mode) ctrlWs.requestStatus();   // mode changé : dimensions à jour
+    if (msg.gain !== undefined) elGain.value = parseFloat(msg.gain).toFixed(1);
+    if (msg.exposure_ms !== undefined) elExpo.value = parseFloat(msg.exposure_ms).toFixed(1);
+    elStatus.className   = 'badge connected';
+    elStatus.textContent = 'Connecté';
+};
+ctrlWs.onError = () => {
+    elStatus.className   = 'badge disconnected';
+    elStatus.textContent = 'WS erreur';
+};
+ctrlWs.connect();
+
+// Alignement : choisi au démarrage (grisé pendant l'empilement)
+const elAlign = document.getElementById('align-toggle');
+
+// Mode capteur et ROI : listes construites depuis les modes du capteur
+// branché (statut /ws/control) — le ROI ne propose que des recadrages qui
+// tiennent dans le mode choisi. Grisés pendant l'empilement.
+const elMode = document.getElementById('mode-select');
+function fillModes(info, current) {
+    fillModeSelect(elMode, info, current);
+    const cur = info.find((m) => m.name === current);
+    if (cur) fillRoiSelect(elRoi, cur.width, cur.height, ROI_CHOICES.live);
+}
+elMode.addEventListener('change', () => { if (elMode.value) ctrlWs.setMode(elMode.value); });
+
+const elRoi = document.getElementById('roi-select');
+elRoi.addEventListener('change', () => {
+    if (stacker) {
+        const roi = parseRoi(elRoi.value);
+        stacker.setRoi(roi?.[0] ?? null, roi?.[1] ?? null);
+    }
+});
+
+elGain.addEventListener('change', () => {
+    if (elSync.checked) ctrlWs.setGain(parseFloat(elGain.value));
+    if (stacker) stacker.flush(3);
+});
+elExpo.addEventListener('change', () => {
+    if (elSync.checked) ctrlWs.setExposure(parseFloat(elExpo.value));
+    if (stacker) stacker.flush(3);
+});
+
+// Range sliders
+function stretchValues() {
+    return {
+        lo:   parseFloat(elStretchLo.value)   / 100,
+        hi:   parseFloat(elStretchHi.value)   / 100,
+        beta: parseFloat(elStretchBeta.value),
+    };
+}
+elStretchLo.addEventListener('input', () => {
+    elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    view()?.setStretch(lo, hi, beta);
+});
+elStretchBeta.addEventListener('input', () => {
+    const v = parseFloat(elStretchBeta.value);
+    elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
+    view()?.setStretchBeta(v);
+});
+elStretchHi.addEventListener('input', () => {
+    elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
+    const { lo, hi, beta } = stretchValues();
+    view()?.setStretch(lo, hi, beta);
+});
+const elSaturation = document.getElementById('saturation');
+const elBgNeutral  = document.getElementById('bg-neutral');
+elSaturation.addEventListener('input', () => {
+    document.getElementById('saturation-val').textContent = elSaturation.value + ' %';
+    view()?.setSaturation(parseInt(elSaturation.value) / 100);
+});
+elBgNeutral.addEventListener('change', () => view()?.setBgNeutral(elBgNeutral.checked));
+
+// Étirement Auto / Manuel (choix mémorisés dans ce navigateur)
+const elStretchMode   = document.getElementById('stretch-mode');
+const elTarget        = document.getElementById('stretch-target');
+const elTargetVal     = document.getElementById('stretch-target-val');
+const elTargetAuto    = document.getElementById('stretch-target-auto');
+const elLocalContrast = document.getElementById('local-contrast');
+const elRemoveGreen   = document.getElementById('remove-green');
+const store = {
+    get(k) { try { return localStorage.getItem('live.' + k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem('live.' + k, v); } catch {} },
+};
+if (store.get('stretchMode')) elStretchMode.value = store.get('stretchMode');
+if (store.get('stretchTarget')) elTarget.value = store.get('stretchTarget');
+if (store.get('targetAuto')) elTargetAuto.checked = store.get('targetAuto') === '1';
+const elLocalContrastVal = document.getElementById('local-contrast-val');
+if (store.get('localContrastAmount')) elLocalContrast.value = store.get('localContrastAmount');
+else if (store.get('localContrast') === '0') elLocalContrast.value = 0;   // ancienne case décochée
+const lcAmount = () => parseInt(elLocalContrast.value) / 100;
+const showLc = () => { elLocalContrastVal.textContent = elLocalContrast.value === '0' ? 'non' : elLocalContrast.value + ' %'; };
+showLc();
+if (store.get('removeGreen')) elRemoveGreen.checked = store.get('removeGreen') === '1';
+const stretchTarget = () => elTargetAuto.checked ? null : parseInt(elTarget.value) / 100;
+function showTarget() {
+    const p = view()?.lastAutoStretch;
+    if (elTargetAuto.checked)
+        elTargetVal.textContent = p ? `auto ${Math.round(p.target * 100)} %` : 'auto';
+    else elTargetVal.textContent = elTarget.value + ' %';
+}
+function syncStretchUi() {
+    const auto = elStretchMode.value === 'auto';
+    document.getElementById('auto-rows').classList.toggle('hidden', !auto);
+    document.getElementById('manual-rows').classList.toggle('hidden', auto);
+    showTarget();
+}
+syncStretchUi();
+elStretchMode.addEventListener('change', () => {
+    store.set('stretchMode', elStretchMode.value);
+    syncStretchUi();
+    view()?.setStretchMode(elStretchMode.value);
+});
+elTarget.addEventListener('input', () => {
+    // déplacer le curseur passe en fond manuel
+    elTargetAuto.checked = false;
+    store.set('stretchTarget', elTarget.value); store.set('targetAuto', '0');
+    showTarget();
+    view()?.setStretchTarget(stretchTarget());
+});
+elTargetAuto.addEventListener('change', () => {
+    store.set('targetAuto', elTargetAuto.checked ? '1' : '0');
+    showTarget();
+    view()?.setStretchTarget(stretchTarget());
+});
+elLocalContrast.addEventListener('input', () => {
+    store.set('localContrastAmount', elLocalContrast.value);
+    showLc();
+    view()?.setLocalContrast(lcAmount());
+});
+elRemoveGreen.addEventListener('change', () => {
+    store.set('removeGreen', elRemoveGreen.checked ? '1' : '0');
+    view()?.setRemoveGreen(elRemoveGreen.checked);
+});
+
+function updateStats() {
+    const v = view();
+    const sc = v?.stackedCount ?? 0;
+    const expS = v?._totalExpMs != null ? (v._totalExpMs / 1000).toFixed(1) : '—';
+    const gainM = v && v._stackedCount > 0
+        ? (v._gainSum / v._stackedCount).toFixed(1) : '—';
+    const r = v?.lastStarReport;
+    const rej = v?.rejectedCount ?? 0;
+    let starLine = '';
+    if (r) {
+        starLine = r.accepted
+            ? (r.method === 'sans alignement' ? `\nSans alignement — ${r.stars} étoiles, FWHM ${r.fwhm.toFixed(1)} px`
+               : `\nÉtoiles : ${r.inliers}/${r.stars} appariées, résidu ${r.rms.toFixed(2)} px, FWHM ${r.fwhm.toFixed(1)} px`) +
+              `\nDérive : ${r.dx.toFixed(0)}, ${r.dy.toFixed(0)} px, rotation ${r.rotationDeg.toFixed(2)}°` +
+              `\nFlux ×${(r.scale ?? 1).toFixed(2)}, poids ${(r.weight ?? 1).toFixed(2)}, pixels chauds ${r.hotPixels ?? 0}, rejets σ ${r.clipped ?? 0}`
+            : `\nDernière image rejetée : ${r.reason}`;
+    }
+    elStats.textContent =
+        `Frames empilées : ${sc}${rej ? `  |  rejetées : ${rej}` : ''}\n` +
+        `Exposition : ${expS} s  |  Gain moy. : ${gainM}` + starLine;
+}
+
+// Test DNG : série de fichiers locaux rejouée dans le pipeline
+const elDngFiles = document.getElementById('dng-files');
+const btnDngClear = document.getElementById('dng-clear');
+elDngFiles.addEventListener('change', () => {
+    btnDngClear.classList.toggle('hidden', !elDngFiles.files.length);
+});
+btnDngClear.addEventListener('click', () => {
+    elDngFiles.value = '';
+    btnDngClear.classList.add('hidden');
+});
+
+// Start / Stop
+btnStart.addEventListener('click', async () => {
+    btnStart.classList.add('hidden');
+    btnStop.classList.remove('hidden');
+    btnReset.disabled    = true;
+    btnSavePng.disabled  = true;
+    btnSaveFits.disabled = true;
+    placeholder.style.display = '';
+    updateStats();
+    elStatus.className   = 'badge connecting';
+    elStatus.textContent = 'Connexion flux…';
+
+    const { lo, hi } = stretchValues();
+    lastStacker = null;
+    stacker = new StreamingStacker({
+        mode:    'live',
+        canvas,
+        options: {
+            stretchLow:  lo,
+            stretchHigh: hi,
+            stretchBeta: parseFloat(elStretchBeta.value),
+            saturation:  parseInt(elSaturation.value) / 100,
+            bgNeutral:   elBgNeutral.checked,
+            stretchMode:   elStretchMode.value,
+            stretchTarget: stretchTarget(),
+            localContrast: lcAmount(),
+            removeGreen:   elRemoveGreen.checked,
+            // Alignement sur les étoiles : détection + triangles + rotation/translation (dso_stacker.js)
+            // Case décochée : même empilement ciel profond, sans recalage
+            // (monture guidée) — pixels chauds, verts, bruit de ligne, rejet σ inclus.
+            alignMode:   'stars',
+            starAlign:   { model: 'similarity', align: elAlign.checked },
+            roi:         parseRoi(elRoi.value),
+        },
+    });
+
+    stacker.addEventListener('frame', () => {
+        updateStats();
+        if (seqRunning) _checkSeqProgress();
+    });
+
+    stacker.addEventListener('preview', () => {
+        showTarget();
+        placeholder.style.display = 'none';
+        btnSavePng.disabled  = false;
+        btnSaveFits.disabled = false;
+    });
+
+    stacker.addEventListener('error', (ev) => {
+        elStats.textContent = 'Erreur : ' + ev.detail.message;
+    });
+
+    // Fichiers locaux : DNG ou FITS (une série d'un seul type), sinon la caméra
+    const dngFiles = [...elDngFiles.files];
+    const isFits = (f) => /\.(fits?|fts)$/i.test(f.name);
+    const kind = !dngFiles.length ? null : dngFiles.every(isFits) ? 'FITS' : dngFiles.some(isFits) ? 'mixte' : 'DNG';
+    if (kind === 'mixte') {
+        elStats.textContent = 'Choisir des fichiers d\'un seul type (DNG ou FITS)';
+        stacker = null; _resetUI();
+        return;
+    }
+    const SourceClass = kind === 'FITS' ? FitsFileSource : DngFileSource;
+    const source = kind
+        ? new SourceClass(dngFiles, {
+            onProgress: (i, n) => { elStatus.textContent = `${kind} ${i} / ${n}`; },
+            onEnd: () => {
+                elStatus.className   = 'badge disconnected';
+                elStatus.textContent = `${kind} terminé`;
+                stacker?.finish();   // dernière relecture : l'aperçu montre le stack complet
+            },
+        })
+        : WS_RAW;
+    elDngFiles.disabled = true;
+    elAlign.disabled = true;
+    elMode.disabled = true;
+    elRoi.disabled = true;
+    try {
+        await stacker.start(source);
+        elStatus.className   = 'badge connected';
+        elStatus.textContent = kind ? `Lecture ${kind}` : 'Flux actif';
+        if (kind === 'DNG') {
+            const h = source.header;
+            console.log(`[DNG] ${source.fileCount} fichiers : ${h.width}×${h.height} ${h.bayer}, ${h.bits} bits, noir ${h.blackLevel}, pose ${(h.exposureMs / 1000).toFixed(1)} s`);
+        } else if (kind === 'FITS') {
+            const h = source.header;
+            console.log(`[FITS] ${source.fileCount} fichiers : ${h.width}×${h.height} ${h.layout}${h.bayer ? ' ' + h.bayer : ''}, `
+                        + `BITPIX ${h.bitpix}, données ${h.bits || 'flottantes'} bits (×${h.scale}), noir ${h.black} (${h.blackSrc}), pose ${(h.exposureMs / 1000).toFixed(1)} s`);
+        }
+    } catch (e) {
+        elStats.textContent  = 'Erreur connexion : ' + e.message;
+        elStatus.className   = 'badge disconnected';
+        elStatus.textContent = 'Déconnecté';
+        _resetUI();
+    }
+});
+
+btnStop.addEventListener('click', async () => {
+    // Garder le stack : plus de nouvelles images, relecture complète (finish)
+    // tant que le worker existe, puis arrêt du flux et des workers.
+    const s = stacker;
+    stacker = null;
+    lastStacker = s;   // dès maintenant : statistiques et réglages restent sur ce stack
+    if (s) {
+        s.pause();
+        try { await s.finish(); } catch (e) { console.warn('[Stack] finish:', e); }
+        s.stop();
+    }
+    updateStats();
+    _stopSeq(false);
+    elStatus.className   = 'badge disconnected';
+    elStatus.textContent = 'Déconnecté';
+    _resetUI();
+    btnReset.disabled = false;
+});
+
+btnReset.addEventListener('click', () => {
+    if (stacker) {
+        stacker.reset();
+    } else {
+        lastStacker = null;
+        btnSavePng.disabled  = true;
+        btnSaveFits.disabled = true;
+        placeholder.style.display = '';
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    updateStats();
+});
+
+btnSavePng.addEventListener('click', () => {
+    savePng(canvas, `live_${formatDate()}.png`);
+});
+
+btnSaveFits.addEventListener('click', async () => {
+    const v = view();
+    if (!v) return;
+    btnSaveFits.disabled = true;
+    try {
+        const result = await v.getStackResult();
+        saveFits(result, `live_${formatDate()}.fits`);
+    } catch (e) {
+        elStats.textContent = 'Erreur FITS : ' + e.message;
+    } finally {
+        btnSaveFits.disabled = false;
+    }
+});
+
+function _resetUI() {
+    btnStart.classList.remove('hidden');
+    btnStop.classList.add('hidden');
+    elDngFiles.disabled = false;
+    elAlign.disabled = false;
+    elMode.disabled = false;
+    elRoi.disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------------------
+
+btnSeqStart.addEventListener('click', async () => {
+    if (!stacker) {
+        elSeqStatus.textContent = 'Démarrez d\'abord le Live Stack.';
+        return;
+    }
+    const count = Math.max(1, parseInt(elSeqCount.value) || 30);
+    const gain  = parseFloat(elSeqGain.value);
+    const expo  = parseFloat(elSeqExpo.value);
+
+    // Save current camera settings to restore after
+    seqGainSave = parseFloat(elGain.value);
+    seqExpoSave = parseFloat(elExpo.value);
+
+    // Apply sequence settings
+    ctrlWs.setGain(gain);
+    ctrlWs.setExposure(expo);
+    stacker.flush(3);
+    stacker.reset();
+
+    seqStart   = 0;  // stackedCount after reset
+    seqTarget  = count;
+    seqRunning = true;
+
+    btnSeqStart.classList.add('hidden');
+    btnSeqStop.classList.remove('hidden');
+    elSeqProgress.classList.remove('hidden');
+    elSeqFill.style.width  = '0%';
+    elSeqLabel.textContent = `0 / ${count}`;
+    elSeqStatus.textContent = `Séquence en cours — ${count} frames à cumuler…`;
+});
+
+btnSeqStop.addEventListener('click', () => _stopSeq(true));
+
+function _checkSeqProgress() {
+    if (!seqRunning || !stacker) return;
+    const done = stacker.stackedCount - seqStart;
+    const pct  = Math.min(100, done / seqTarget * 100);
+    elSeqFill.style.width  = pct.toFixed(1) + '%';
+    elSeqLabel.textContent = `${done} / ${seqTarget}`;
+
+    if (done >= seqTarget) {
+        _finishSeq();
+    }
+}
+
+async function _finishSeq() {
+    seqRunning = false;
+    elSeqStatus.textContent = 'Séquence terminée — sauvegarde…';
+
+    // Auto-save
+    try {
+        const result = await stacker.getStackResult();
+        saveFits(result, `seq_${formatDate()}.fits`);
+        savePng(canvas, `seq_${formatDate()}.png`);
+        elSeqStatus.textContent = 'Séquence sauvegardée.';
+    } catch (e) {
+        elSeqStatus.textContent = 'Erreur sauvegarde : ' + e.message;
+    }
+
+    // Restore camera settings
+    if (seqGainSave !== null) ctrlWs.setGain(seqGainSave);
+    if (seqExpoSave !== null) ctrlWs.setExposure(seqExpoSave);
+    stacker.flush(3);
+
+    btnSeqStart.classList.remove('hidden');
+    btnSeqStop.classList.add('hidden');
+}
+
+function _stopSeq(restore) {
+    if (!seqRunning) return;
+    seqRunning = false;
+    if (restore) {
+        if (seqGainSave !== null) ctrlWs.setGain(seqGainSave);
+        if (seqExpoSave !== null) ctrlWs.setExposure(seqExpoSave);
+        stacker?.flush(3);
+    }
+    btnSeqStart.classList.remove('hidden');
+    btnSeqStop.classList.add('hidden');
+    elSeqProgress.classList.add('hidden');
+    elSeqStatus.textContent = '—';
+}
+
+// Plein écran
+const btnFs = document.getElementById('btn-fullscreen');
+btnFs.addEventListener('click', () => {
+    const box = document.getElementById('preview-box');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else box.requestFullscreen().catch(e => console.warn('Fullscreen:', e));
+});
+document.addEventListener('fullscreenchange', () => {
+    btnFs.textContent = document.fullscreenElement ? '⊡' : '⛶';
+});
+</script>
+</body>
+</html>

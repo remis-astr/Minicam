@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Test WsFrameReceiver</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 1rem; }
+  canvas { display: block; max-width: 100%; margin: 1rem 0; border: 1px solid #444; }
+  #log  { white-space: pre; font-size: 0.85em; color: #8f8; max-height: 300px; overflow-y: auto; }
+  #meta { color: #ff8; margin: 0.5rem 0; }
+  button { padding: 0.4rem 1rem; margin: 0.25rem; cursor: pointer; }
+</style>
+</head>
+<body>
+<h2>Test WsFrameReceiver — smoke test (à supprimer après validation)</h2>
+<div>
+  <button id="btn-start">▶ Connecter</button>
+  <button id="btn-stop" disabled>■ Déconnecter</button>
+  <button id="btn-flush">↺ Flush 3 frames</button>
+</div>
+<div id="meta">En attente…</div>
+<canvas id="canvas" width="640" height="360"></canvas>
+<div id="log"></div>
+
+<script type="module">
+import { WsFrameReceiver } from './ws_frame_receiver.js';
+
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/raw`;
+
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const elMeta   = document.getElementById('meta');
+const elLog    = document.getElementById('log');
+const btnStart = document.getElementById('btn-start');
+const btnStop  = document.getElementById('btn-stop');
+const btnFlush = document.getElementById('btn-flush');
+
+let rx         = null;
+let frameCount = 0;
+
+function log(msg) {
+    elLog.textContent = `[${new Date().toISOString().slice(11,23)}] ${msg}\n` + elLog.textContent;
+}
+
+// Debayer simplifié (extraction canal vert G1 uniquement) pour le smoke test.
+// G1 est au pixel (1,0) dans un pattern RGGB : index col impair, ligne paire.
+// Ce n'est pas un vrai debayer — juste assez pour vérifier que les pixels arrivent.
+function debayerGreenOnly(pixels, w, h) {
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            const src = y * w + x;
+            // Choisir un canal selon la position Bayer RGGB :
+            // (pair,pair)=R  (impair,pair)=G1  (pair,impair)=G2  (impair,impair)=B
+            const val8 = pixels[src] >> 8;   // 16 bits → 8 bits (shift-4 déjà appliqué)
+            const dst  = src * 4;
+            const isR  = (y % 2 === 0) && (x % 2 === 0);
+            const isB  = (y % 2 === 1) && (x % 2 === 1);
+            out[dst    ] = isR ? val8 : 0;
+            out[dst + 1] = (!isR && !isB) ? val8 : 0;
+            out[dst + 2] = isB ? val8 : 0;
+            out[dst + 3] = 255;
+        }
+    }
+    return out;
+}
+
+function showFrame(pixels, meta) {
+    const { width: w, height: h, gain, exposure_ms, bayer, ts } = meta;
+
+    frameCount++;
+    elMeta.textContent =
+        `Frame #${frameCount} — ${w}×${h}  bayer=${bayer}  gain=${gain?.toFixed(1)}  exp=${exposure_ms?.toFixed(1)} ms` +
+        `\nreçues=${rx.framesReceived}  droppées=${rx.droppedFrames}`;
+
+    if (frameCount === 1) log(`Frame #1 : ${w}×${h}, ${bayer}, gain=${gain?.toFixed(1)}, exp=${exposure_ms?.toFixed(1)}ms`);
+
+    // Ne redessiner le canvas qu'une frame sur 5 pour ne pas bloquer le JS
+    if (frameCount % 5 !== 0) return;
+
+    // Adapter le canvas à la résolution reçue
+    const scale  = Math.min(640 / w, 360 / h);
+    const dw     = Math.round(w * scale);
+    const dh     = Math.round(h * scale);
+    canvas.width  = dw;
+    canvas.height = dh;
+
+    const rgba  = debayerGreenOnly(pixels, w, h);
+    const idata = new ImageData(rgba, w, h);
+
+    // Dessiner via OffscreenCanvas pour éviter de créer un canvas plein-res dans le DOM
+    const off   = new OffscreenCanvas(w, h);
+    const octx  = off.getContext('2d');
+    octx.putImageData(idata, 0, 0);
+    ctx.drawImage(off, 0, 0, dw, dh);
+}
+
+btnStart.addEventListener('click', async () => {
+    btnStart.disabled = true;
+    btnStop.disabled  = false;
+
+    rx = new WsFrameReceiver(WS_URL);
+    rx.onFrame = showFrame;
+
+    try {
+        await rx.start();
+        log(`Connecté à ${WS_URL}`);
+    } catch (e) {
+        log(`Erreur connexion : ${e}`);
+        btnStart.disabled = false;
+        btnStop.disabled  = true;
+    }
+});
+
+btnStop.addEventListener('click', () => {
+    rx?.stop();
+    rx = null;
+    frameCount = 0;
+    log('Déconnecté');
+    btnStart.disabled = false;
+    btnStop.disabled  = true;
+    elMeta.textContent = 'Déconnecté';
+});
+
+btnFlush.addEventListener('click', () => {
+    if (rx) { rx.flush(3); log('Flush 3 frames demandé'); }
+});
+</script>
+</body>
+</html>

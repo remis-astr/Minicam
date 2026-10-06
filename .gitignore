@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.claude/
+# Real WiFi credentials stay local — see AllskyAP.nmconnection.example
+etc/NetworkManager/system-connections/*.nmconnection
+# Runtime state / personal notes
+var/
+Allsky Minicam Hostname.txt
+
+# Clés privées (autorité HTTPS : minicam-tls-setup) — jamais dans le dépôt
+*.key
+ca.srl

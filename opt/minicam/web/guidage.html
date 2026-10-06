@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guidage M8S</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* Page de pilotage du M8S (monture OnStep, plate solve, autoguidage).
+     Tout le calcul se fait sur le M8S : cette page ne fait qu'afficher et
+     appeler son API (port 8080, relayé par allsky). Aucune ressource
+     externe : au jardin, le téléphone n'a pas internet. */
+  .g-section { width: 100%; max-width: 800px; background: #1a1a1a; border: 1px solid #333;
+               border-radius: 6px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .g-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.4rem 0.8rem; }
+  .g-kv { display: flex; flex-direction: column; font-size: 0.8rem; color: #999; }
+  .g-kv b { font-size: 1rem; color: #eee; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .g-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+  .g-row button, .g-row select, .g-row input { min-height: 40px; }
+  .g-row input, .g-row select { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 0 0.5rem; }
+  .g-row input { width: 7.5rem; }
+  .g-msg { font-size: 0.85rem; color: #bbb; min-height: 1.2em; }
+  .g-warn { background: #3a2a10; border: 1px solid #6a4a1a; color: #fc6; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; }
+  .g-err  { background: #3a1a1a; border: 1px solid #6a2a2a; color: #f88; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; }
+  .g-ok   { color: #6d6; }
+  .g-preview { position: relative; width: 100%; background: #000; border: 1px solid #333; border-radius: 4px;
+               aspect-ratio: 16/9; overflow: hidden; }
+  .g-preview img { width: 100%; height: 100%; object-fit: contain; display: block; cursor: crosshair; }
+  .g-preview .g-hint { position: absolute; left: 0.5rem; bottom: 0.4rem; font-size: 0.75rem; color: #aaa;
+                       background: rgba(0,0,0,0.55); padding: 2px 6px; border-radius: 3px; }
+  canvas.g-chart { width: 100%; height: 190px; background: #0c0c0c; border: 1px solid #333; border-radius: 4px; }
+  .g-legend { display: flex; gap: 1rem; font-size: 0.8rem; }
+  .g-legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                           margin-right: 4px; vertical-align: -1px; background: var(--c); }
+  .g-rms { display: flex; gap: 1rem; font-variant-numeric: tabular-nums; font-size: 0.95rem; }
+  .g-log { font-family: ui-monospace, monospace; font-size: 0.75rem; color: #aaa; max-height: 9rem;
+           overflow-y: auto; white-space: pre-wrap; background: #111; border-radius: 4px; padding: 0.4rem; }
+  details summary { cursor: pointer; color: #aaa; font-size: 0.9rem; }
+  .g-settings { display: grid; grid-template-columns: 1fr auto; gap: 0.35rem 0.6rem; align-items: center;
+                font-size: 0.85rem; margin-top: 0.5rem; }
+  .g-settings input, .g-settings select { width: 6.5rem; min-height: 34px; background: #222; color: #eee;
+                border: 1px solid #444; border-radius: 4px; padding: 0 0.4rem; }
+  .btn-primary { background: #1a4a8a; }
+  a.g-back { color: #8bf; text-decoration: none; font-size: 0.9rem; }
+  .badge-sim { background: #640; color: #fff; }
+  /* Raquette : maintien du doigt = mouvement (sécurité « homme mort » côté M8S) */
+  .pad { display: grid; grid-template-columns: repeat(3, 72px); grid-template-rows: repeat(3, 60px);
+         gap: 6px; justify-content: center; margin: 0.3rem 0; touch-action: none; user-select: none;
+         -webkit-user-select: none; -webkit-touch-callout: none; }
+  .pad button { font-size: 1rem; font-weight: 600; padding: 0; border-radius: 8px; background: #2a2a3a;
+                touch-action: none; }
+  .pad button small { display: block; font-size: 0.65rem; font-weight: 400; color: #aaa; }
+  .pad button.held { background: #3a6ab0; }
+  .pad .pad-stop { background: #6a1a1a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Guidage M8S</h1>
+  <span id="m8s-badge" class="badge connecting">M8S…</span>
+  <span id="sim-badge" class="badge badge-sim hidden">SIMULATION</span>
+  <a class="g-back" href="/">← Caméra</a>
+</header>
+
+<main>
+  <!-- ============================================================ MONTURE -->
+  <section class="g-section" id="sec-mount">
+    <h3 class="section-title">Monture</h3>
+    <div id="mount-alert" class="g-err hidden"></div>
+    <div id="time-alert" class="g-warn hidden"></div>
+    <div class="g-grid">
+      <div class="g-kv">Type<b id="m-type">—</b></div>
+      <div class="g-kv">Suivi<b id="m-track">—</b></div>
+      <div class="g-kv">AD<b id="m-ra">—</b></div>
+      <div class="g-kv">Déc<b id="m-dec">—</b></div>
+      <div class="g-kv">Hauteur<b id="m-alt">—</b></div>
+      <div class="g-kv">Azimut<b id="m-az">—</b></div>
+      <div class="g-kv">Heure E4 (UTC)<b id="m-utc">—</b></div>
+      <div class="g-kv">Contrôleur<b id="m-ctrl">—</b></div>
+    </div>
+    <div class="g-row">
+      <button id="btn-track-on">▶ Suivi</button>
+      <button id="btn-track-off">■ Arrêt suivi</button>
+      <button id="btn-stop" class="btn-danger">✋ STOP</button>
+    </div>
+    <details id="pad-box">
+      <summary>Raquette</summary>
+      <div class="g-row" style="margin-top:0.5rem; justify-content:center">
+        <label>Vitesse <select id="pad-rate"></select></label>
+      </div>
+      <div class="pad">
+        <span></span><button data-dir="n"><span class="lbl">N</span><small class="sub"></small></button><span></span>
+        <button data-dir="e"><span class="lbl">E</span><small class="sub"></small></button>
+        <button class="pad-stop" id="pad-stop">STOP</button>
+        <button data-dir="w"><span class="lbl">O</span><small class="sub"></small></button>
+        <span></span><button data-dir="s"><span class="lbl">S</span><small class="sub"></small></button><span></span>
+      </div>
+      <p class="indi-info" id="pad-info">Maintenir le bouton appuyé : la monture s'arrête dès qu'on relâche (ou si la liaison se coupe). Indisponible pendant le guidage et l'alignement.</p>
+    </details>
+    <details>
+      <summary>GoTo par coordonnées (JNow)</summary>
+      <div class="g-row" style="margin-top:0.5rem">
+        <input id="goto-ra" placeholder="AD hh:mm:ss" inputmode="decimal">
+        <input id="goto-dec" placeholder="Déc ±dd:mm:ss" inputmode="decimal">
+        <button id="btn-goto">GoTo</button>
+        <button id="btn-center">GoTo + centrage</button>
+      </div>
+    </details>
+    <div id="mount-msg" class="g-msg"></div>
+  </section>
+
+  <!-- ============================================================ CAMERA -->
+  <section class="g-section" id="sec-cam">
+    <h3 class="section-title">Caméra guide (allsky)</h3>
+    <p class="indi-info">Réglages de la caméra, identiques à ceux de la page principale. Le M8S ne les modifie jamais : il utilise l'image telle que réglée ici. Un mode recadré réduit la latence de calcul (≈0,85 s en 2028×1080, ≈0,17 s en 480p) mais contient moins d'étoiles ; solver de préférence dans un mode large.</p>
+    <div class="g-row">
+      <label>Mode <select id="cam-mode"></select></label>
+      <label>Pose (ms) <input id="cam-expo" type="number" min="1" max="120000" step="50"></label>
+      <label>Gain <input id="cam-gain" type="number" min="1" max="64" step="0.5"></label>
+      <label>Focale optique guide (mm) <input id="cam-focal" type="number" min="20" max="5000" step="1"></label>
+    </div>
+    <div id="cam-msg" class="g-msg"></div>
+  </section>
+
+  <!-- ========================================================= ALIGNEMENT -->
+  <section class="g-section" id="sec-align">
+    <h3 class="section-title">Plate solve &amp; alignement</h3>
+    <div class="g-row">
+      <button id="btn-solve">Résoudre</button>
+      <button id="btn-solve-sync" class="btn-primary">Résoudre + recaler</button>
+    </div>
+    <div class="g-row">
+      <label>Alignement <select id="align-mode">
+        <option value="manual" selected>manuel (visée à la raquette)</option>
+        <option value="auto">automatique (GoTo)</option>
+      </select></label>
+      <label>Points <select id="align-n">
+        <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+      </select></label>
+    </div>
+    <div class="g-row" id="align-auto-opts">
+      <label>Ciel dégagé vers <select id="align-az">
+        <option value="0">N</option><option value="45">NE</option><option value="90">E</option><option value="135">SE</option>
+        <option value="180" selected>S</option><option value="225">SO</option><option value="270">O</option><option value="315">NO</option>
+      </select></label>
+      <label>Étendue <select id="align-span"><option>60</option><option selected>90</option><option>120</option><option>180</option></select>°</label>
+      <label>Hauteurs <select id="align-alts"><option value="30,55">30–55°</option><option value="35,65" selected>35–65°</option><option value="45,70">45–70°</option></select></label>
+    </div>
+    <p class="indi-info" id="align-help">Manuel : lancer, puis viser une zone dégagée à la raquette et « Ajouter ce point ». Écarter les points d'au moins 60° et varier les hauteurs.</p>
+    <div class="g-row">
+      <button id="btn-align" class="btn-primary">Démarrer l'alignement (monture en position home)</button>
+      <button id="btn-align-add" class="btn-primary hidden">Ajouter ce point</button>
+      <button id="btn-align-abort" class="btn-danger hidden">Interrompre</button>
+    </div>
+    <div id="align-sep" class="g-msg"></div>
+    <div id="solve-result" class="g-msg"></div>
+    <div id="align-log" class="g-log hidden"></div>
+  </section>
+
+  <!-- ============================================================ GUIDAGE -->
+  <section class="g-section" id="sec-guide">
+    <h3 class="section-title">Autoguidage</h3>
+    <div class="g-preview">
+      <img id="g-preview" alt="Image de guidage">
+      <span class="g-hint">Touchez l'image pour placer le pivot (axe de l'instrument principal)</span>
+    </div>
+    <div class="g-grid">
+      <div class="g-kv">État<b id="g-state">—</b></div>
+      <div class="g-kv">Étoiles<b id="g-stars">—</b></div>
+      <div class="g-kv">Image<b id="g-frame">—</b></div>
+      <div class="g-kv">Rotation de champ<b id="g-rot">—</b></div>
+    </div>
+    <div id="g-msg" class="g-msg"></div>
+    <div class="g-row">
+      <button id="btn-calib">Calibrer</button>
+      <button id="btn-guide" class="btn-primary">▶ Guider</button>
+      <button id="btn-guide-stop" class="btn-danger">■ Arrêter</button>
+      <button id="btn-pivot-center">Pivot au centre</button>
+    </div>
+    <div class="g-rms">RMS <span>AD <b id="rms-ra">—</b></span><span>Déc <b id="rms-dec">—</b></span><span>Total <b id="rms-tot">—</b></span></div>
+    <canvas id="g-chart" class="g-chart"></canvas>
+    <div class="g-legend">
+      <span style="--c:#4aa3ff">AD (″)</span><span style="--c:#ff6a5a">Déc (″)</span>
+      <span style="--c:#555">impulsions</span>
+    </div>
+    <div id="calib-info" class="g-msg"></div>
+    <details>
+      <summary>Réglages du guidage</summary>
+      <div class="g-settings" id="g-settings"></div>
+      <div class="g-row" style="margin-top:0.6rem">
+        <label><input type="checkbox" id="sim-toggle"> Mode simulation (ciel et monture simulés, pour les essais)</label>
+      </div>
+    </details>
+  </section>
+</main>
+
+<script>
+'use strict';
+// L'API du M8S est relayée par allsky sur le port 8080 (nftables, voir
+// /etc/minicam/m8s-forward.nft) : même hôte que cette page.
+const API = `${location.protocol}//${location.hostname}:8080`;
+const $ = id => document.getElementById(id);
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(API + path, opt);
+  const txt = await r.text();
+  let data; try { data = JSON.parse(txt); } catch { data = { detail: txt }; }
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+function show(el, on) { el.classList.toggle('hidden', !on); }
+function msg(el, text, cls) { el.textContent = text; el.className = 'g-msg' + (cls ? ' ' + cls : ''); }
+
+// ------------------------------------------------------------- formats --
+function hms(h) {
+  if (h == null) return '—';
+  const t = Math.round(((h % 24) + 24) % 24 * 3600);
+  return `${String(Math.floor(t / 3600)).padStart(2, '0')}h${String(Math.floor(t / 60) % 60).padStart(2, '0')}m${String(t % 60).padStart(2, '0')}s`;
+}
+function dms(d) {
+  if (d == null) return '—';
+  const s = d < 0 ? '−' : '+', t = Math.round(Math.abs(d) * 3600);
+  return `${s}${Math.floor(t / 3600)}°${String(Math.floor(t / 60) % 60).padStart(2, '0')}′${String(t % 60).padStart(2, '0')}″`;
+}
+function parseSexa(str) {   // "12:34:56", "12 34 56", "12.5" -> nombre décimal
+  const m = String(str).trim().replace(',', '.').match(/^([+-−]?)(\d+(?:\.\d+)?)(?:[:\sh°]+(\d+(?:\.\d+)?))?(?:[:\sm′']+(\d+(?:\.\d+)?))?/);
+  if (!m) return NaN;
+  const v = +m[2] + (m[3] ? +m[3] / 60 : 0) + (m[4] ? +m[4] / 3600 : 0);
+  return (m[1] === '-' || m[1] === '−') ? -v : v;
+}
+
+// ============================================================== MONTURE --
+let mountType = null;
+async function pollMount() {
+  try {
+    const s = await api('/status');
+    $('m8s-badge').className = 'badge connected'; $('m8s-badge').textContent = 'M8S';
+    const alert = $('mount-alert');
+    if (!s.connected) {
+      alert.className = 'g-err'; alert.textContent = 'Monture non connectée : ' + (s.error || '');
+      return;
+    }
+    show(alert, false);
+    mountType = s.mount_type;
+    updatePadLabels();
+    $('m-type').textContent = { ALTAZM: 'ALT-AZ', GEM: 'EQ (allemande)', FORK: 'EQ (fourche)' }[s.mount_type] || s.mount_type || '—';
+    $('m-track').innerHTML = s.tracking ? '<span class="g-ok">actif</span>' : 'arrêté';
+    $('m-ra').textContent = hms(s.ra_h); $('m-dec').textContent = dms(s.dec_deg);
+    $('m-alt').textContent = s.alt_deg != null ? s.alt_deg.toFixed(1) + '°' : '—';
+    $('m-az').textContent = s.az_deg != null ? s.az_deg.toFixed(1) + '°' : '—';
+    $('m-ctrl').textContent = `${s.product || ''} ${s.version || ''}`;
+    if (s.alt_deg > 75 && s.mount_type === 'ALTAZM') {
+      alert.className = 'g-warn';
+      alert.textContent = 'Proche du zénith : rotation de champ très rapide, guidage ALT-AZ déconseillé au-dessus de ~75°.';
+    }
+  } catch (e) {
+    $('m8s-badge').className = 'badge disconnected'; $('m8s-badge').textContent = 'M8S injoignable';
+  }
+}
+async function pollTime() {
+  try {
+    const t = await api('/mount/site');
+    $('m-utc').textContent = t.utc ? t.utc.slice(11, 19) : '—';
+    const badSid = Math.abs(t.sidereal_error_s || 0) > 5;
+    const badClock = t.mount_clock_ok === false;
+    show($('time-alert'), badSid || badClock);
+    if (badClock) {
+      const e = t.mount_clock_error_s, a = Math.abs(e);
+      const txt = a >= 86400 ? `${(a / 86400).toFixed(1)} j` : a >= 60 ? `${Math.round(a / 60)} min` : `${a.toFixed(1)} s`;
+      $('time-alert').textContent = `Horloge de la monture ${e < 0 ? 'en retard' : 'en avance'} de ${txt} sur celle du téléphone : refaire la mise à l'heure via SWS.`;
+    } else if (badSid) $('time-alert').textContent = `Heure/site de la monture incohérents (temps sidéral décalé de ${t.sidereal_error_s} s) : refaire la mise à l'heure via SWS.`;
+  } catch { /* monture absente : déjà signalé */ }
+}
+async function act(el, path, body, okText) {
+  try { await api(path, body); msg(el, okText || 'OK', 'g-ok'); } catch (e) { msg(el, e.message, 'g-err'); }
+}
+$('btn-track-on').onclick = () => act($('mount-msg'), '/mount/track', { action: 'start' }, 'Suivi démarré');
+$('btn-track-off').onclick = () => act($('mount-msg'), '/mount/track', { action: 'stop' }, 'Suivi arrêté');
+$('btn-stop').onclick = async () => {
+  await Promise.allSettled([api('/guide/stop', {}), api('/align/abort', {}), api('/mount/stop', {})]);
+  msg($('mount-msg'), 'STOP envoyé (monture, guidage, alignement)', 'g-ok');
+};
+function gotoTarget() {
+  const ra = parseSexa($('goto-ra').value), dec = parseSexa($('goto-dec').value);
+  if (!(ra >= 0 && ra < 24) || !(dec >= -90 && dec <= 90)) throw new Error('coordonnées invalides');
+  return { ra_h: ra, dec_deg: dec };
+}
+$('btn-goto').onclick = () => { try { act($('mount-msg'), '/mount/slew', gotoTarget(), 'GoTo lancé'); } catch (e) { msg($('mount-msg'), e.message, 'g-err'); } };
+$('btn-center').onclick = async () => {
+  let tgt; try { tgt = gotoTarget(); } catch (e) { return msg($('mount-msg'), e.message, 'g-err'); }
+  msg($('mount-msg'), 'GoTo + centrage en cours…');
+  try {
+    const r = await api('/center', tgt);
+    const steps = r.steps.map(s => `${s.iteration}: ${s.error_arcsec}″`).join(', ');
+    msg($('mount-msg'), (r.ok ? 'Centré — ' : 'Centrage incomplet — ') + steps + (r.error ? ' — ' + r.error : ''), r.ok ? 'g-ok' : 'g-err');
+  } catch (e) { msg($('mount-msg'), e.message, 'g-err'); }
+};
+
+// ============================================================= RAQUETTE --
+// En ALT-AZ, OnStepX déplace directement les axes (mesuré : n = hauteur +,
+// w = azimut +) ; en EQ, Déc et AD.
+const PAD_LABELS = {
+  ALTAZM: { n: ['▲', 'Haut'], s: ['▼', 'Bas'], e: ['◀', 'Az −'], w: ['▶', 'Az +'] },
+  EQ:     { n: ['N', 'Déc +'], s: ['S', 'Déc −'], e: ['E', 'AD +'], w: ['O', 'AD −'] },
+};
+let padLabelsFor = null;
+function updatePadLabels() {
+  const kind = mountType === 'ALTAZM' ? 'ALTAZM' : 'EQ';
+  if (padLabelsFor === kind) return;
+  padLabelsFor = kind;
+  document.querySelectorAll('.pad button[data-dir]').forEach(b => {
+    const [lbl, sub] = PAD_LABELS[kind][b.dataset.dir];
+    b.querySelector('.lbl').textContent = lbl; b.querySelector('.sub').textContent = sub;
+  });
+}
+(async () => {
+  try {
+    const rates = await api('/paddle/rates');
+    for (const [k, v] of Object.entries(rates)) $('pad-rate').add(new Option(v, k));
+    $('pad-rate').value = '5';
+  } catch { /* M8S injoignable : réessayé au prochain chargement */ }
+})();
+let padTimer = null, padDir = null;
+async function padPress(dir) {
+  try { await api('/paddle/press', { direction: dir, rate: +$('pad-rate').value }); }
+  catch (e) { padRelease(); msg($('mount-msg'), e.message, 'g-err'); }
+}
+function padRelease() {
+  if (!padDir) return;
+  clearInterval(padTimer); padTimer = null;
+  document.querySelectorAll('.pad button.held').forEach(b => b.classList.remove('held'));
+  const dir = padDir; padDir = null;
+  api('/paddle/release', { direction: dir }).catch(() => {});
+}
+document.querySelectorAll('.pad button[data-dir]').forEach(b => {
+  b.addEventListener('pointerdown', ev => {
+    ev.preventDefault();
+    padRelease();
+    b.setPointerCapture(ev.pointerId);
+    padDir = b.dataset.dir; b.classList.add('held');
+    padPress(padDir);
+    padTimer = setInterval(() => padDir && padPress(padDir), 250);   // renouvelle l'appui
+  });
+  for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(t, padRelease);
+  b.addEventListener('contextmenu', ev => ev.preventDefault());
+});
+$('pad-stop').onclick = () => { padRelease(); api('/paddle/release', {}).catch(() => {}); api('/mount/stop', {}).catch(() => {}); };
+document.addEventListener('visibilitychange', () => { if (document.hidden) padRelease(); });
+
+// =============================================================== CAMERA --
+// Réglages caméra via le canal de contrôle d'allsky (même origine que la page).
+let camWs = null;
+function camConnect() {
+  camWs = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/control`);
+  camWs.onopen = () => camWs.send(JSON.stringify({ cmd: 'status' }));
+  camWs.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.cmd === 'status') {
+      const sel = $('cam-mode');
+      if (sel.options.length === 0 && m.raw_modes) m.raw_modes.forEach(r => sel.add(new Option(r, r)));
+      if (m.raw_mode) sel.value = m.raw_mode;
+      if (document.activeElement !== $('cam-expo')) $('cam-expo').value = m.exposure_ms;
+      if (document.activeElement !== $('cam-gain')) $('cam-gain').value = m.gain;
+      $('cam-gain').max = m.gain_max || 64;
+    } else if (m.cmd === 'ack') {
+      msg($('cam-msg'), 'Réglage appliqué', 'g-ok');
+    } else if (m.cmd === 'error') {
+      msg($('cam-msg'), m.detail, 'g-err');
+    }
+  };
+  camWs.onclose = () => setTimeout(camConnect, 3000);
+}
+function camSend(o) { if (camWs && camWs.readyState === 1) camWs.send(JSON.stringify(o)); }
+$('cam-mode').onchange = () => { msg($('cam-msg'), 'Changement de mode…'); camSend({ cmd: 'set_mode', value: $('cam-mode').value }); };
+$('cam-expo').onchange = () => camSend({ cmd: 'set_exposure', value_ms: +$('cam-expo').value });
+$('cam-gain').onchange = () => camSend({ cmd: 'set_gain', value: +$('cam-gain').value });
+// Focale : réglage du M8S (plate solve et échelle du guidage)
+let focalMm = null;
+api('/optics').then(o => { focalMm = o.focal_mm; $('cam-focal').value = o.focal_mm; }).catch(() => {});
+$('cam-focal').onchange = () => api('/optics', { focal_mm: +$('cam-focal').value })
+  .then(o => { focalMm = o.focal_mm; msg($('cam-msg'), `Focale réglée à ${o.focal_mm} mm`, 'g-ok'); })
+  .catch(e => msg($('cam-msg'), e.message, 'g-err'));
+
+// ============================================================ ALIGNEMENT --
+function solveText(r) {
+  const cam = `${r.sensor} ${r.raw_mode}, pose ${Math.round(r.exposure_ms)} ms, gain ${r.gain}`;
+  if (!r.solved) return `Non résolu : ${r.message} (${cam}, champ ${r.fov_height_deg}°). Allonger la pose ou passer en mode large.`;
+  let t = `Résolu en ${r.solve_s} s : AD ${hms(r.ra_jnow_h)} Déc ${dms(r.dec_jnow_deg)} (JNow), angle ${r.rotation_deg != null ? r.rotation_deg.toFixed(1) + '°' : '—'}, ${r.scale_arcsec_px}″/px${r.synced ? ' — monture recalée' : ''} (${cam})`;
+  if (r.measured_focal_mm && focalMm && Math.abs(r.measured_focal_mm / focalMm - 1) > 0.05)
+    t += ` — focale mesurée ${r.measured_focal_mm} mm ≠ réglage ${focalMm} mm : corriger le réglage`;
+  return t;
+}
+async function doSolve(sync) {
+  msg($('solve-result'), 'Capture et résolution…');
+  try { const r = await api('/solve', { sync }); msg($('solve-result'), solveText(r), r.solved ? 'g-ok' : 'g-err'); }
+  catch (e) { msg($('solve-result'), e.message, 'g-err'); }
+}
+$('btn-solve').onclick = () => doSolve(false);
+$('btn-solve-sync').onclick = () => doSolve(true);
+function alignModeUi() {
+  const auto = $('align-mode').value === 'auto';
+  show($('align-auto-opts'), auto);
+  $('align-help').textContent = auto
+    ? 'Automatique : les GoTo s\'enchaînent vers la zone choisie, hauteurs variées. La raquette est bloquée pendant l\'alignement.'
+    : 'Manuel : lancer, puis viser une zone dégagée à la raquette et « Ajouter ce point ». Écarter les points d\'au moins 60° et varier les hauteurs.';
+}
+$('align-mode').onchange = alignModeUi;
+$('btn-align').onclick = async () => {
+  const n = +$('align-n').value, auto = $('align-mode').value === 'auto';
+  if (!confirm(`Alignement ${auto ? 'automatique' : 'manuel'} ${n} point(s) : la monture doit être en position HOME${auto ? ' ; les GoTo vont s\'enchaîner automatiquement' : ''}. Continuer ?`)) return;
+  try {
+    if (auto) {
+      const [amin, amax] = $('align-alts').value.split(',').map(Number);
+      await api('/align/start', { points: n, az_center: +$('align-az').value, az_span: +$('align-span').value, alt_min: amin, alt_max: amax });
+    } else {
+      await api('/align/manual/start', { points: n });
+      $('pad-box').open = true;
+    }
+    pollAlign();
+  } catch (e) { msg($('solve-result'), e.message, 'g-err'); }
+};
+$('btn-align-add').onclick = async () => {
+  $('btn-align-add').disabled = true;
+  msg($('solve-result'), 'Capture et résolution du point…');
+  try {
+    const r = await api('/align/manual/add', {});
+    msg($('solve-result'), r.added ? `Point ${r.point.index} ajouté (${solveText(r.point.solve)})` : solveText(r.point.solve), r.added ? 'g-ok' : 'g-err');
+  } catch (e) { msg($('solve-result'), e.message, 'g-err'); }
+  $('btn-align-add').disabled = false;
+  pollAlign();
+};
+$('btn-align-abort').onclick = () => api('/align/abort', {});
+let alignTimer = null;
+async function pollAlign() {
+  clearTimeout(alignTimer);
+  try {
+    const a = await api('/align/status');
+    const running = a.state === 'running', manual = a.state === 'manual';
+    show($('btn-align-abort'), running || manual); show($('btn-align-add'), manual);
+    show($('btn-align'), !running && !manual);
+    show($('align-log'), !!(a.log && a.log.length));
+    if (manual) {
+      const done = (a.points || []).length, sep = a.current_separation;
+      let t = `Point ${done + 1} / ${a.n_points} : viser à la raquette puis « Ajouter ce point ».`;
+      if (sep && sep.separations_deg.length) {
+        t += ` Écart avec les points pris : ${sep.separations_deg.map(d => d + '°').join(', ')}`;
+        if (sep.too_close) t += ` — trop proche (< ${sep.min_recommended_deg}°), s'écarter davantage`;
+      }
+      msg($('align-sep'), t, sep && sep.too_close ? 'g-err' : '');
+    } else msg($('align-sep'), '');
+    $('align-log').textContent = (a.log || []).join('\n');
+    $('align-log').scrollTop = 1e6;
+    if (a.state === 'done') msg($('solve-result'), 'Alignement terminé et enregistré', 'g-ok');
+    if (a.state === 'error') msg($('solve-result'), 'Alignement échoué : ' + a.error, 'g-err');
+    if (running || manual) alignTimer = setTimeout(pollAlign, 2000);
+  } catch { alignTimer = setTimeout(pollAlign, 4000); }
+}
+
+// ============================================================== GUIDAGE --
+let lastFrame = null, previewBusy = false, previewUrl = null;
+const STATE_TXT = { idle: 'à l\'arrêt', calibrating: 'calibration', guiding: 'guidage', lost: 'étoiles perdues', error: 'erreur' };
+
+async function refreshPreview() {
+  if (previewBusy) return;
+  previewBusy = true;
+  try {
+    const r = await fetch(API + '/guide/preview.jpg', { cache: 'no-store' });
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      $('g-preview').src = url;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = url;
+    }
+  } catch { /* pas encore d'image */ }
+  previewBusy = false;
+}
+
+function drawChart(hist) {
+  const cv = $('g-chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const c = cv.getContext('2d'); c.scale(dpr, dpr); c.clearRect(0, 0, W, H);
+  const pts = hist.slice(-100);
+  const maxAbs = Math.max(2, ...pts.flatMap(p => [Math.abs(p.ra_arcsec), Math.abs(p.dec_arcsec)]));
+  const lim = Math.ceil(maxAbs);
+  const y = v => H / 2 - v / lim * (H / 2 - 12), x = i => 34 + i * (W - 40) / Math.max(99, pts.length - 1);
+  c.font = '10px system-ui'; c.fillStyle = '#777'; c.strokeStyle = '#2a2a2a'; c.lineWidth = 1;
+  for (const v of [-lim, -lim / 2, 0, lim / 2, lim]) {
+    c.beginPath(); c.moveTo(34, y(v)); c.lineTo(W, y(v)); c.stroke();
+    c.fillText((v > 0 ? '+' : '') + v.toFixed(1) + '″', 0, y(v) + 3);
+  }
+  const maxMs = Math.max(500, ...pts.flatMap(p => [Math.abs(p.ra_pulse_ms), Math.abs(p.dec_pulse_ms)]));
+  c.fillStyle = '#444';
+  pts.forEach((p, i) => {   // impulsions : barres discrètes autour de l'axe
+    const hr = p.ra_pulse_ms / maxMs * (H / 4), hd = p.dec_pulse_ms / maxMs * (H / 4);
+    c.fillRect(x(i) - 2, H / 2, 2, -hr); c.fillRect(x(i), H / 2, 2, -hd);
+  });
+  for (const [key, col] of [['ra_arcsec', '#4aa3ff'], ['dec_arcsec', '#ff6a5a']]) {
+    c.strokeStyle = col; c.lineWidth = 1.6; c.beginPath();
+    pts.forEach((p, i) => (i ? c.lineTo(x(i), y(p[key])) : c.moveTo(x(i), y(p[key]))));
+    c.stroke();
+  }
+}
+
+async function pollGuide() {
+  let g;
+  try { g = await api('/guide/status?points=100'); } catch { return; }
+  lastFrame = g.frame;
+  show($('sim-badge'), g.simulated);
+  $('sim-toggle').checked = g.simulated;
+  $('g-state').textContent = STATE_TXT[g.state] || g.state;
+  msg($('g-msg'), g.message || '', g.state === 'error' || g.state === 'lost' ? 'g-err' : '');
+  if (g.frame) {
+    $('g-stars').textContent = g.frame.stars;
+    $('g-frame').textContent = `${g.frame.raw_mode}, ${Math.round(g.frame.exposure_ms)} ms`;
+  }
+  const last = g.history[g.history.length - 1];
+  $('g-rot').textContent = mountType === 'ALTAZM' && last ? `${last.rot_deg.toFixed(2)}°` : (mountType === 'ALTAZM' ? '—' : 'sans objet (EQ)');
+  $('rms-ra').textContent = g.rms.ra != null ? g.rms.ra + '″' : '—';
+  $('rms-dec').textContent = g.rms.dec != null ? g.rms.dec + '″' : '—';
+  $('rms-tot').textContent = g.rms.total != null ? g.rms.total + '″' : '—';
+  drawChart(g.history);
+  const c = g.calibration;
+  $('calib-info').textContent = c
+    ? `Calibration du ${new Date(c.time * 1000).toLocaleString('fr-FR')} — ${c.mount_type || ''}, Déc ${c.dec_deg.toFixed(1)}°, orthogonalité ${c.ortho_error_deg}°, jeu Déc ${c.backlash_ms} ms`
+    : 'Pas encore de calibration.';
+  if (!settingsBuilt) buildSettings(g.settings);
+  if (g.state !== 'idle' || !$('g-preview').src) refreshPreview();
+}
+
+$('btn-calib').onclick = () => act($('g-msg'), '/guide/calibrate', {}, 'Calibration lancée (suivi actif requis)');
+$('btn-guide').onclick = () => act($('g-msg'), '/guide/start', {}, 'Guidage lancé');
+$('btn-guide-stop').onclick = () => act($('g-msg'), '/guide/stop', {}, 'Arrêt demandé');
+$('btn-pivot-center').onclick = () => api('/guide/settings', { pivot_dx: 0, pivot_dy: 0 }).then(refreshPreview);
+$('g-preview').onclick = ev => {
+  // clic -> pixels du mode -> pixels natifs depuis le centre du capteur
+  if (!lastFrame) return;
+  const img = ev.currentTarget, r = img.getBoundingClientRect();
+  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+  const ox = (r.width - img.naturalWidth * scale) / 2, oy = (r.height - img.naturalHeight * scale) / 2;
+  const fx = (ev.clientX - r.left - ox) / (img.naturalWidth * scale);
+  const fy = (ev.clientY - r.top - oy) / (img.naturalHeight * scale);
+  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+  const k = lastFrame.native_per_px;
+  const dx = (fx - 0.5) * lastFrame.width * k, dy = (fy - 0.5) * lastFrame.height * k;
+  api('/guide/settings', { pivot_dx: Math.round(dx * 10) / 10, pivot_dy: Math.round(dy * 10) / 10 })
+    .then(() => { msg($('g-msg'), `Pivot placé (${dx.toFixed(0)}, ${dy.toFixed(0)}) px natifs depuis le centre`, 'g-ok'); refreshPreview(); })
+    .catch(e => msg($('g-msg'), e.message, 'g-err'));
+};
+
+// Réglages : libellés et bornes des clés de guider.Settings côté M8S.
+const SETTINGS = [
+  ['ra_aggressiveness', 'Agressivité AD', 0, 1.5, 0.05],
+  ['ra_hysteresis', 'Hystérésis AD', 0, 0.9, 0.05],
+  ['dec_aggressiveness', 'Agressivité Déc', 0, 1.5, 0.05],
+  ['dec_mode', 'Mode Déc', ['auto', 'north', 'south', 'off']],
+  ['min_move_px', 'Déplacement minimal (px natifs)', 0, 5, 0.05],
+  ['max_pulse_ms', 'Impulsion maximale (ms)', 100, 10000, 100],
+  ['skip_frames_after_pulse', 'Trames ignorées après impulsion', 0, 3, 1],
+  ['dec_backlash_comp', 'Compensation du jeu Déc', 'bool'],
+  ['calib_step_ms', 'Pas de calibration (ms)', 100, 5000, 100],
+  ['calib_target_px', 'Déplacement de calibration (px natifs)', 5, 100, 1],
+];
+let settingsBuilt = false;
+function buildSettings(cur) {
+  const box = $('g-settings'); box.innerHTML = '';
+  for (const [key, label, a, b, step] of SETTINGS) {
+    const l = document.createElement('label'); l.textContent = label; l.htmlFor = 'set-' + key;
+    let inp;
+    if (Array.isArray(a)) { inp = document.createElement('select'); a.forEach(v => inp.add(new Option(v, v))); inp.value = cur[key]; }
+    else if (a === 'bool') { inp = document.createElement('input'); inp.type = 'checkbox'; inp.checked = cur[key]; inp.style.width = 'auto'; }
+    else { inp = document.createElement('input'); inp.type = 'number'; inp.min = a; inp.max = b; inp.step = step; inp.value = cur[key]; }
+    inp.id = 'set-' + key;
+    inp.onchange = () => {
+      const v = a === 'bool' ? inp.checked : Array.isArray(a) ? inp.value : +inp.value;
+      api('/guide/settings', { [key]: v }).then(() => msg($('g-msg'), `${label} = ${v}`, 'g-ok')).catch(e => msg($('g-msg'), e.message, 'g-err'));
+    };
+    box.append(l, inp);
+  }
+  settingsBuilt = true;
+}
+$('sim-toggle').onchange = async ev => {
+  try {
+    await api('/guide/simulation', { enabled: ev.target.checked, mount_type: mountType === 'GEM' ? 'GEM' : 'ALTAZM' });
+    settingsBuilt = false; $('g-preview').removeAttribute('src');
+  } catch (e) { ev.target.checked = !ev.target.checked; msg($('g-msg'), e.message, 'g-err'); }
+};
+
+// ============================================================ BOUCLES ----
+camConnect();
+alignModeUi();
+pollMount(); pollTime(); pollGuide(); pollAlign();
+setInterval(() => { if (!document.hidden) pollMount(); }, 3000);
+setInterval(() => { if (!document.hidden) pollTime(); }, 30000);
+setInterval(() => { if (!document.hidden) pollGuide(); }, 1500);
+</script>
+</body>
+</html>
