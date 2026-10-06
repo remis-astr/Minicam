@@ -19,6 +19,7 @@ _DEFAULTS: dict[str, Any] = {
     "camera": {"sensor": "imx327", "default_gain": 10.0, "default_exposure_ms": 100.0, "binning": False},
     "oled": {"contrast": 20, "auto_sleep_seconds": 60, "rotate": 0, "i2c_address": "0x3C"},
     "network": {"usb_ip": "192.168.7.3", "usb_prefix": 24},
+    "imu": {"enabled": True},  # BNO085 (I2C bus 8) for AstroHopper
     "api": {"host": "0.0.0.0", "port": 8000, "ws_deflate": False,
             "https_port": 0, "tls_dir": "/etc/minicam/tls"},
 }

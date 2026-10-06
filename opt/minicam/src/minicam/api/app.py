@@ -12,10 +12,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from minicam.camera.controller import CameraController
-from minicam.config import STATE_PATH
+from minicam.config import STATE_PATH, load_config
+from minicam.imu import IMUStreamer
 from minicam.api.routes_capture import router as capture_router
 from minicam.api.routes_control import router as control_router
 from minicam.api.routes_guide import router as guide_router
+from minicam.api.routes_imu import router as imu_router
 from minicam.api.routes_photos import router as photos_router
 from minicam.api.routes_preview import router as preview_router, start_capture_loop
 from minicam.api.routes_raw_stream import router as raw_router
@@ -51,6 +53,10 @@ def _cma_retry_count() -> int:
 camera: CameraController | None = None
 
 
+def _imu_enabled() -> bool:
+    return bool(load_config().get("imu", {}).get("enabled", True))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global camera
@@ -67,6 +73,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.tl_last_jpeg = None
     app.state.tl_session = None
     app.state.capture_task = None
+    app.state.imu = None
+    if _imu_enabled():
+        app.state.imu = IMUStreamer()
+        app.state.imu.start()
     # Camera init failure (wrong/missing sensor, transient DMA alloc error) must
     # not take the whole web server down with it — the UI (incl. the sensor
     # switch controls) needs to stay reachable so it can be used to recover.
@@ -105,6 +115,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         start_capture_loop(app)
     log.info("Camera ready" if app.state.camera_error is None else "Camera unavailable")
     yield
+    if app.state.imu:
+        app.state.imu.stop()
     if app.state.tl_task:
         app.state.tl_task.cancel()
     if app.state.capture_task:
@@ -150,4 +162,7 @@ def create_app() -> FastAPI:
     app.include_router(timelapse_router)
     app.include_router(wifi_router)
     app.mount("/static", StaticFiles(directory="/opt/minicam/web"), name="static")
+    if _imu_enabled():
+        app.include_router(imu_router)
+        app.mount("/astrohopper", StaticFiles(directory="/opt/minicam/web/astrohopper", html=True), name="astrohopper")
     return app

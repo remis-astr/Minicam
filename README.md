@@ -1,7 +1,16 @@
-# Multicam
+# Minicam
 
 Caméra astro / allsky autonome sur **Raspberry Pi Zero 2 W**, pilotée depuis
 une page web (téléphone ou PC) servie par le Pi lui-même.
+
+**Minicam = [Multicam](https://github.com/remis-astr/Multicam) + IMU BNO085
+et navigation AstroHopper** (voir « IMU et AstroHopper » plus bas). Le reste
+du dépôt suit Multicam ; pour reprendre ses mises à jour :
+
+```bash
+git remote add multicam https://github.com/remis-astr/Multicam.git  # une fois
+git fetch multicam && git merge multicam/master
+```
 
 ## Fonctions
 
@@ -20,6 +29,8 @@ une page web (téléphone ou PC) servie par le Pi lui-même.
   | IMX585 / IMX678 | 1928×1090 binné, 3856×2180 | DKMS de Will Whang (StarlightEye) |
   | IMX662 | 1936×1100 | DKMS de Will Whang (StarlightEye) |
 
+- **Navigation AstroHopper** (carte du ciel) orientée par l'IMU BNO085 du
+  Pi, sans le gyroscope du téléphone
 - Réseau : point d'accès WiFi `MULTICAM` (192.168.4.1, mot de passe
   `multicam`, actif dès le premier démarrage) et liaison USB
   « gadget » Ethernet (192.168.7.3 par défaut, configurable)
@@ -47,6 +58,31 @@ Le dépôt suit l'arborescence du Pi :
   dans `/usr/local` ; `minicam-api.service` ajoute ses modules Python au
   `PYTHONPATH`
 - Configuration : `/etc/minicam/config.toml` (section `[camera]`, clé `sensor`)
+
+## IMU et AstroHopper
+
+Spécifique à Minicam. Fichiers : `opt/minicam/src/minicam/imu.py`
+(lecture du BNO085, fusion interne « Game Rotation Vector » ~100 Hz),
+`api/routes_imu.py` (`/ws/imu`, calibration de l'accéléromètre) et
+`opt/minicam/web/astrohopper/` (page `/astrohopper/astrohopper.html`,
+`imu_shim.js` remplace l'orientation du téléphone par celle du Pi).
+
+- **Câblage** : BNO085 en I2C sur GPIO 2 (SDA) et GPIO 3 (SCL), broche ADR à
+  la masse (adresse `0x4A`).
+- **Bus I2C logiciel n° 8** (le BNO085 étire l'horloge, ce que l'I2C matériel
+  du BCM2835 ne supporte pas), dans `config.txt`, section `[all]` :
+
+  ```
+  dtoverlay=i2c-gpio,i2c_gpio_sda=2,i2c_gpio_scl=3,i2c_gpio_delay_us=0,bus=8
+  ```
+- **Bibliothèques** (utilisateur `admin`) :
+  `pip install --user --break-system-packages adafruit-circuitpython-bno08x adafruit-extended-bus`
+  (installe aussi Blinka).
+- **Calibration** : `/home/admin/.config/minicam/imu_cal.json`.
+- **Sans IMU** : `[imu] enabled = false` dans `/etc/minicam/config.toml`
+  (ni lecture du capteur, ni routes `/ws/imu`, ni `/astrohopper`). Activée par
+  défaut ; si le capteur ne répond pas, l'API démarre quand même et abandonne
+  l'IMU après quelques essais.
 
 ## Lucky Stack — notes
 
@@ -498,3 +534,12 @@ Depuis la page web : choisir le capteur branché. L'API réécrit
   `/var/lib/minicam/cma_retries`) ; en général la 2e tentative passe.
 - Message « capteur détecté incompatible avec le profil … RAW attendu … » :
   pilote patché absent ou écrasé par une mise à jour du noyau (étape 7).
+
+## Licences
+
+- Code Minicam / Multicam : **GPL-3.0** (`LICENSE`)
+- AstroHopper (Artyom Beilis) : **Apache 2.0**
+- Catalogue d'étoiles (Eleanor Lutz) : **GPL**
+- VSOP87 (Greg Miller) : **domaine public**
+
+Détail des attributions : `opt/minicam/web/astrohopper/NOTICE`.
