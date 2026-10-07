@@ -70,6 +70,35 @@ Le dépôt suit l'arborescence du Pi :
 - **RAW 8 bits** : les 8 bits de poids fort sont pris directement dans la
   trame CSI-2 empaquetée (RAW10/RAW12, ROI comprise) sans dépaquetage —
   mêmes octets qu'avant, 4 ms au lieu de 25 ms par image sur Pi Zero 2 W.
+- **RAW 16 bits avec ROI** : seuls les groupes de packing qui couvrent le
+  ROI sont dépaquetés (`unpack_raw_box`), au lieu de toute l'image puis
+  recadrage — résultat identique. ROI 640×480 : 103 → 20 ms en 2028×1080
+  10 bits, 929 → 54 ms en 4056×3040 ; flux RAW 16 bits en USB 7 → 20 img/s.
+- **Présélection sur le Pi** (menu « Présélection Pi » : désactivée par
+  défaut, 50 / 25 / 10 % envoyées) : le Pi mesure la netteté de chaque
+  image et n'envoie que les meilleures, la liaison (Wi-Fi surtout) ne
+  transporte plus les images que le navigateur aurait rejetées. Score =
+  variance du Laplacien sur un des deux plans verts du ROI, lu en 8 bits de
+  poids fort directement dans le RAW empaqueté (~1 ms en 640×480) ; même
+  règle que la sélection du navigateur (percentile des 50 derniers scores,
+  5 premières images toujours acceptées). En RAW, chaque image produite
+  par la caméra passe par le `post_callback` de picamera2, et 3 threads
+  calculent le score dans le buffer caméra sans copie (`MappedArray`) :
+  seules les images retenues sont extraites, puis envoyées au rythme des
+  crédits (file de 4) ; si les 3 threads sont occupés, l'image n'est pas
+  analysée (compteur « non analysées »). JPEG/PNG : capture image par image.
+  `/ws/raw` : `{"cmd": "set_preselect", "keep": 0.25}` ; métadonnées
+  `presel_keep`, `presel_score`, `presel_analyzed`, `presel_sent`,
+  `presel_skipped`, résumées dans les statistiques de la page.
+  Mesuré en USB, IMX477, ROI 640×480, 25 % (images analysées/s) : pose
+  22,5 ms (capteur 44 img/s) → 44, aucune ratée ; pose 2 ms, `720p_bin`
+  (capteur 169 img/s) → 92 (62 en 16 bits), `2028x1080_bin` (75 img/s) →
+  64, plein champ 2028×1080 → 31 (17 en capturant image par image). Limite
+  restante : le traitement de chaque requête par libcamera/picamera2 —
+  même sans aucun calcul, Python ne reçoit que ~130 img/s en `720p_bin` et
+  ~230 en `640x480_bin` (capteur 456) ; réduire le flux ISP n'y change
+  rien. Une image écartée par le Pi est perdue ; garder une sélection plus
+  large côté navigateur (ex. 50 % avec 25 % côté Pi).
 - **Compression zstd** (menu Compression, RAW seulement, sans perte) :
   `{"cmd": "set_compression", "codec": "zstd"}` sur `/ws/raw`, chaque image
   porte `"compression"` dans ses métadonnées. Compression par la libzstd du
@@ -213,8 +242,13 @@ Le dépôt suit l'arborescence du Pi :
   moins en 1080p. Lucky Stack n'est pas concerné. Le FITS reste brut.
   Saturation des couleurs dans les deux modes. Aperçu pendant
   l'empilement : au plus toutes les 500 ms ET au moins 2× la durée du
-  dernier rendu, comptés depuis sa fin (en 4K l'aperçu prend 1–2 s et
-  bloque le pipeline : il passait sinon après chaque image). Tris des
+  dernier rendu, comptés depuis sa fin (l'aperçu bloque le pipeline : il
+  passait sinon après chaque image). Le débayérisage MHC de l'instantané
+  (`demosaicBlend`) prenait ~15 s en 4056×2160 et repoussait l'aperçu
+  suivant de plus de 30 s : l'écran restait sur la première image jusqu'à
+  ■ Arrêter. Noyaux déroulés à l'intérieur de l'image (bords inchangés),
+  résultat identique au bit près : instantané 22 → 2,1 s, aperçu complet
+  ≈ 5,5 s dans Chrome, soit un aperçu toutes les ~11 s en 4K. Tris des
   percentiles en tableaux typés (étirement Manuel 4K : 2,9 → 1,4 s). ■ Arrêter (ou fin des DNG) relit le stack complet et le garde :
   étirement, point blanc, saturation, fond neutre et exports PNG/FITS
   restent actifs ; ▶ Démarrer ou ↺ Reset l'oublient. Case « Alignement étoiles » décochée :
@@ -496,5 +530,19 @@ Depuis la page web : choisir le capteur branché. L'API réécrit
   ret: -16` dans dmesg). L'API s'arrête alors et systemd la relance avec une
   CMA propre (3 fois au plus en 5 min, compteur
   `/var/lib/minicam/cma_retries`) ; en général la 2e tentative passe.
+  À la dernière relance, l'API revient au mode capteur par défaut : un mode
+  mémorisé trop gros pour la CMA ne bloque plus la caméra à chaque
+  démarrage.
+- Modes de plus de 5 Mpx (IMX477 natif 4056×3040…) : le flux ISP « main »
+  est en YUV420 avec 2 buffers (converti en BGR à la capture). En RGB888,
+  un seul buffer natif fait 37 Mo et même 2 buffers ne s'allouaient pas
+  (~135 Mo de CMA libres après le démarrage).
+- Aperçu de la page principale : réduit à 2028 px de large avant
+  l'encodage JPEG (le canevas est à la taille de l'écran ; stacks, photos et
+  timelapse gardent la pleine résolution), capture et encodage hors de la
+  boucle asyncio — en natif, l'encodage d'un JPEG de 12 Mpx (0,4 à 4 s)
+  gelait tout le serveur. Côté navigateur, une seule boucle d'aperçu (pause
+  de 1 s sur une réponse 503) : une reconnexion `/ws/control` en chaîne en
+  relançait une de plus toutes les 5 s, jusqu'à ~150 requêtes/s.
 - Message « capteur détecté incompatible avec le profil … RAW attendu … » :
   pilote patché absent ou écrasé par une mise à jour du noyau (étape 7).
