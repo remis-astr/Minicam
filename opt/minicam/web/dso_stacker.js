@@ -345,25 +345,46 @@ function select(a, n, k) {
  * (±2, ±4, ±6, ±8 : neutralise la structure de la scène) ; décalage = médiane
  * de ces écarts hors étoiles (|écart| < 4 × écart absolu médian), estimée sur
  * un pixel sur deux de la couleur ; soustrait de toute la ligne.
+ * Hors structures de la scène : un pixel dont les lignes voisines varient
+ * nettement plus que le bruit (bord horizontal, poutre, horizon) n'entre pas
+ * dans l'estimation — sinon, dès que ce bord couvre plus de la moitié de la
+ * ligne, la médiane mesure la scène et toute la ligne est décalée (trait
+ * horizontal sur toute la largeur). Trop peu de pixels restants : pas de
+ * correction pour cette ligne.
  */
 function rowBandingCPU(raw, w, h) {
     const out = new Uint16Array(raw);
     const cap = (w >> 2) + 2;
-    const d = new Float64Array(cap), e = new Float64Array(cap), kept = new Float64Array(cap);
     const R = [2, 4, 6, 8];
+    // étendue (max − min) des lignes voisines de même couleur
+    const spreadAt = (x, y) => {
+        let lo = 65535, hi = 0;
+        for (const r of R) for (const yy of [y - r, y + r]) {
+            if (yy < 0 || yy >= h) continue;
+            const v = raw[yy * w + x]; lo = v < lo ? v : lo; hi = v > hi ? v : hi;
+        }
+        return hi - lo;
+    };
+    // seuil d'étendue : 3 × l'étendue médiane de l'image (bruit + bandes du
+    // capteur, que la plupart des pixels ne voient qu'à ce niveau), sur ~50 000 points
+    const sample = [], sy = Math.max(1, Math.round(h / 200)), sx = Math.max(1, Math.round(w / 250));
+    for (let y = 0; y < h; y += sy) for (let x = 0; x < w; x += sx) sample.push(spreadAt(x, y));
+    const spreadLim = 3 * (median(sample) || 1);
+    const d = new Float64Array(cap), e = new Float64Array(cap), kept = new Float64Array(cap);
     let maxOff = 0;
     for (let y = 0; y < h; y++) {
         for (let par = 0; par < 2; par++) {
-            let m = 0;
-            for (let x = par; x < w; x += 4) {
-                let s = 0, c = 0;
+            let m = 0, mAll = 0;
+            for (let x = par; x < w; x += 4, mAll++) {
+                let s = 0, c = 0, lo = 65535, hi = 0;
                 for (let k = 0; k < 4; k++) {
                     const r = R[k];
-                    if (y - r >= 0) { s += raw[(y - r) * w + x]; c++; }
-                    if (y + r < h) { s += raw[(y + r) * w + x]; c++; }
+                    if (y - r >= 0) { const v = raw[(y - r) * w + x]; s += v; c++; lo = v < lo ? v : lo; hi = v > hi ? v : hi; }
+                    if (y + r < h) { const v = raw[(y + r) * w + x]; s += v; c++; lo = v < lo ? v : lo; hi = v > hi ? v : hi; }
                 }
-                d[m++] = raw[y * w + x] - s / c;
+                if (hi - lo <= spreadLim) d[m++] = raw[y * w + x] - s / c;
             }
+            if (m < Math.max(16, mAll >> 3)) continue;   // ligne dominée par la scène
             for (let i = 0; i < m; i++) e[i] = d[i];
             const med = select(e, m, m >> 1);
             for (let i = 0; i < m; i++) e[i] = Math.abs(d[i] - med);
