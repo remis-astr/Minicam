@@ -64,6 +64,9 @@ class CameraController:
         self.noise_reduction: int = int(state.get("noise_reduction", 1))
         self._lock = threading.Lock()
         self._picam2: Picamera2 | None = None
+        # Appelées par picamera2 (son thread caméra) pour chaque image produite
+        # — voir add_frame_callback.
+        self._frame_callbacks: list = []
 
     def _raw_stream(self) -> tuple[tuple[int, int], str]:
         """True sensor/RAW capture size+format, per the selected raw_mode —
@@ -172,6 +175,7 @@ class CameraController:
         with self._lock:
             try:
                 self._picam2 = Picamera2()
+                self._picam2.post_callback = self._dispatch_frame
                 self._picam2.configure(self._make_config())
                 # libcamera silently renegotiates an unsatisfiable RAW request
                 # down to whatever the physically connected sensor actually
@@ -215,6 +219,26 @@ class CameraController:
                         pass
                     self._picam2 = None
                 raise
+
+    def _dispatch_frame(self, request: Any) -> None:
+        for fn in list(self._frame_callbacks):
+            try:
+                fn(request)
+            except Exception:
+                log.exception("Callback d'image en échec")
+
+    def add_frame_callback(self, fn) -> None:
+        """`fn(request)` est appelée dans le thread caméra de picamera2 pour
+        chaque image produite, y compris celles qu'aucune capture ne demande
+        (présélection Lucky Stack : aucune image ratée). Elle doit rendre la
+        main vite : pour garder l'image plus longtemps, `request.acquire()`
+        puis `request.release()` depuis un autre thread. Survit aux
+        réouvertures de la caméra."""
+        self._frame_callbacks.append(fn)
+
+    def remove_frame_callback(self, fn) -> None:
+        if fn in self._frame_callbacks:
+            self._frame_callbacks.remove(fn)
 
     def close(self) -> None:
         with self._lock:

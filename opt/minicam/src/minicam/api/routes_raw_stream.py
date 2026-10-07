@@ -5,12 +5,15 @@ import json
 import logging
 import math
 import struct
+import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from picamera2 import MappedArray
 
 from minicam.api import zstd
 from minicam.api.routes_capture import raw_msb8, unpack_raw_box
@@ -69,9 +72,8 @@ class Preselector:
     navigateur aurait de toute façon rejetées, le capteur peut tourner plus
     vite qu'elle. Même règle que la sélection du navigateur (stacker.js) :
     seuil = percentile (1 - keep) des 50 derniers scores, les 5 premières
-    images passent le temps de calibrer.
-
-    Utilisé sous _capture_lock (une capture à la fois) : pas de verrou ici.
+    images passent le temps de calibrer. Appelé depuis plusieurs threads
+    (PreselectStream) : verrou interne.
     """
     WINDOW = 50
 
@@ -80,18 +82,21 @@ class Preselector:
         self.scores: deque[float] = deque(maxlen=self.WINDOW)
         self.analyzed = 0
         self.sent = 0
+        self.skipped = 0   # images produites mais non analysées (calcul saturé)
         # Au-delà, l'image la plus nette des essais part quand même : le flux
         # ne doit jamais caler (seeing qui se dégrade, scène qui change).
         self.max_tries = max(2, math.ceil(3 / keep))
+        self._lock = threading.Lock()
 
     def accepts(self, score: float) -> bool:
-        self.analyzed += 1
-        self.scores.append(score)
-        if len(self.scores) < 5:
-            return True
-        ranked = sorted(self.scores)
-        idx = max(0, math.floor((1 - self.keep) * len(ranked)) - 1)
-        return score >= ranked[idx]
+        with self._lock:
+            self.analyzed += 1
+            self.scores.append(score)
+            if len(self.scores) < 5:
+                return True
+            ranked = sorted(self.scores)
+            idx = max(0, math.floor((1 - self.keep) * len(ranked)) - 1)
+            return score >= ranked[idx]
 
 
 def _laplacian_var(plane: np.ndarray) -> float:
@@ -134,57 +139,158 @@ def _select(capture, score, presel: Preselector | None):
     return best[0], best[1], presel.max_tries
 
 
-def _capture_and_encode(
-    camera,
-    roi: tuple[int, int] | None = None,
-    bit_depth: int = 16,
-    compression: str = "none",
-    presel: Preselector | None = None,
-) -> tuple[bytes, int, int, dict]:
-    """Capture + unpack + crop ROI centré + encode — thread pool, jamais asyncio.
-    compression="zstd" : charge utile compressée sans perte (trame zstd).
-    presel : présélection par netteté (voir Preselector)."""
-    t_cap = time.monotonic()
-    bits = camera.raw_bits
-
-    def capture():
-        raw_arr, meta = camera.capture_raw()
-        return raw_arr, meta, _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
-
-    def score(item) -> float:
-        raw_arr, _meta, box = item
-        return _laplacian_var(_green_msb8(raw_arr, bits, box, camera.bayer_pattern))
-
-    (raw_arr, meta, box), sharpness, tries = _select(capture, score, presel)
-    t_unpack = time.monotonic()
+def _extract_raw(raw_arr: np.ndarray, bits: int, box: tuple[int, int, int, int], bit_depth: int) -> np.ndarray:
+    """Boîte du ROI d'une image RAW compressée, en 8 ou 16 bits (copie)."""
     if bit_depth == 8:
         # MSB bytes gathered straight from the packed frame, ROI included —
         # same bytes as the top byte of the left-shifted 16-bit unpack.
-        data = raw_msb8(raw_arr, bits, *box)
-    else:
-        # Seulement la boîte du ROI est décompressée (unpack_raw_box)
-        data = (unpack_raw_box(raw_arr, bits, *box) << (16 - bits)).astype("uint16")
+        return raw_msb8(raw_arr, bits, *box)
+    # Seulement la boîte du ROI est décompressée (unpack_raw_box)
+    return (unpack_raw_box(raw_arr, bits, *box) << (16 - bits)).astype("uint16")
 
-    h, w = data.shape
+
+def _encode_raw(data: np.ndarray, compression: str, timing: dict) -> bytes:
+    """Octets envoyés (zstd éventuel) ; complète `timing`."""
     t_tobytes = time.monotonic()
     payload = data.tobytes()
     t_compress = time.monotonic()
     if compression == "zstd":
         payload = zstd.compress(payload)
     t_done = time.monotonic()
+    timing.update({
+        "tobytes_ms": (t_compress - t_tobytes) * 1000,
+        "compress_ms": (t_done - t_compress) * 1000,
+        "payload_bytes": len(payload),
+    })
+    return payload
+
+
+def _capture_and_encode(
+    camera,
+    roi: tuple[int, int] | None = None,
+    bit_depth: int = 16,
+    compression: str = "none",
+) -> tuple[bytes, int, int, dict]:
+    """Capture + unpack + crop ROI centré + encode — thread pool, jamais asyncio.
+    compression="zstd" : charge utile compressée sans perte (trame zstd)."""
+    t_cap = time.monotonic()
+    raw_arr, meta = camera.capture_raw()
+    t_unpack = time.monotonic()
+    box = _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
+    data = _extract_raw(raw_arr, camera.raw_bits, box, bit_depth)
+    h, w = data.shape
     timing = {
         # Niveau de noir du capteur (libcamera, échelle 16 bits comme les
         # pixels envoyés) — à soustraire avant toute calibration couleur.
         "black_level": _black_level(meta, camera),
         "capture_ms": (t_unpack - t_cap) * 1000,
-        "unpack_ms": (t_tobytes - t_unpack) * 1000,
-        "tobytes_ms": (t_compress - t_tobytes) * 1000,
-        "compress_ms": (t_done - t_compress) * 1000,
-        "payload_bytes": len(payload),
-        "presel_score": sharpness,
-        "presel_tries": tries,
+        "unpack_ms": (time.monotonic() - t_unpack) * 1000,
     }
+    payload = _encode_raw(data, compression, timing)
     return payload, h, w, timing
+
+
+class PreselectStream:
+    """Présélection RAW sans rater d'images : le callback d'image de la
+    caméra (thread de picamera2) confie chaque image produite à 3 threads
+    qui calculent le score directement dans le buffer caméra (MappedArray,
+    sans copie) ; seules les images retenues sont extraites (ROI, 8/16 bits)
+    et mises en file pour l'envoi.
+
+    Mesuré sur le Pi Zero 2 W, pose 2 ms, ROI 640×480, 25 % gardées
+    (images analysées / produites) : 2028x1080_bin 93 % (66 % en capturant
+    image par image), 720p_bin 110 img/s (76), 640x480_bin 130 img/s (81).
+    Au-delà, c'est le traitement de chaque requête par libcamera/picamera2
+    qui plafonne (~130 et ~230 img/s reçues même sans aucun calcul).
+
+    Au plus 3 images en calcul à la fois (sur les 4 buffers caméra) : si les
+    threads sont tous occupés, l'image est laissée passer (compteur skipped)
+    plutôt que de priver la caméra de buffers.
+    """
+    WORKERS = 3
+    QUEUE = 4   # images retenues en attente d'envoi (les plus anciennes cèdent)
+
+    def __init__(self, camera, presel: Preselector, roi, bit_depth: int) -> None:
+        self.camera, self.presel, self.roi, self.bit_depth = camera, presel, roi, bit_depth
+        self._slots = threading.Semaphore(self.WORKERS)
+        self._pool = ThreadPoolExecutor(self.WORKERS, thread_name_prefix="presel")
+        self._ready: deque = deque(maxlen=self.QUEUE)
+        self._cond = threading.Condition()
+        self._stopped = False
+        camera.add_frame_callback(self._on_frame)
+
+    def _on_frame(self, request) -> None:
+        """Thread caméra : rendre la main tout de suite."""
+        if self._stopped:
+            return
+        if not self._slots.acquire(blocking=False):
+            self.presel.skipped += 1
+            return
+        request.acquire()
+        try:
+            self._pool.submit(self._score, request)
+        except RuntimeError:   # pool arrêté entre-temps
+            request.release()
+            self._slots.release()
+
+    def _score(self, request) -> None:
+        try:
+            cam = self.camera
+            mode = cam.profile.get_raw_mode(cam.raw_mode)
+            # Changement de mode en cours : image d'une autre taille, ignorée
+            if tuple(request.config["raw"]["size"]) != mode.size:
+                return
+            meta = request.get_metadata()
+            bits = cam.raw_bits
+            with MappedArray(request, "raw") as m:
+                raw = m.array
+                # Modes à crop_width (IMX327 540p/480p) : le RAW n'est pas encore
+                # recadré ici (_apply_width_crop) — décaler la boîte d'autant.
+                box = list(_center_box(mode.delivered_size[0], raw.shape[0], self.roi))
+                box[0] += (mode.size[0] - mode.delivered_size[0]) // 2
+                box = tuple(box)
+                score = _laplacian_var(_green_msb8(raw, bits, box, cam.bayer_pattern))
+                if not self.presel.accepts(score):
+                    return
+                data = _extract_raw(raw, bits, box, self.bit_depth)
+            with self._cond:
+                self._ready.append((data, meta, score))
+                self._cond.notify()
+        except Exception:
+            log.exception("[ws/raw] présélection : image en échec")
+        finally:
+            request.release()
+            self._slots.release()
+
+    def next_payload(self, compression: str) -> tuple[bytes, int, int, dict]:
+        """Prochaine image retenue, encodée — thread pool, jamais asyncio."""
+        t0 = time.monotonic()
+        # quelques poses de marge : la caméra peut aussi être en train de
+        # changer de mode ou d'être rouverte
+        timeout = 3.0 + 4 * self.camera.exposure_us / 1e6
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._ready or self._stopped, timeout):
+                raise RuntimeError("présélection : aucune image retenue de la caméra")
+            if self._stopped:
+                raise RuntimeError("présélection arrêtée")
+            data, meta, score = self._ready.popleft()
+        self.presel.sent += 1
+        h, w = data.shape
+        timing = {
+            "black_level": _black_level(meta, self.camera),
+            "capture_ms": (time.monotonic() - t0) * 1000,   # attente d'une image retenue
+            "unpack_ms": 0.0,                               # fait par les threads de calcul
+            "presel_score": score,
+        }
+        return _encode_raw(data, compression, timing), h, w, timing
+
+    def stop(self) -> None:
+        self._stopped = True
+        self.camera.remove_frame_callback(self._on_frame)
+        with self._cond:
+            self._cond.notify_all()
+        # rend les buffers caméra encore tenus par les calculs en cours
+        self._pool.shutdown(wait=True)
 
 
 def _capture_and_encode_isp(
@@ -331,6 +437,26 @@ async def ws_raw(websocket: WebSocket) -> None:
     # avant de démarrer la capture — évite la race condition.
     await asyncio.sleep(0.05)
 
+    # Présélection RAW : flux continu (PreselectStream) propre à ce client,
+    # refait quand la présélection, le ROI ou la profondeur changent.
+    stream: PreselectStream | None = None
+
+    def preselect_stream(cur_presel, cur_roi, cur_bit_depth) -> PreselectStream:
+        nonlocal stream
+        if stream is not None and (stream.presel is not cur_presel or stream.roi != cur_roi
+                                   or stream.bit_depth != cur_bit_depth):
+            stream.stop()
+            stream = None
+        if stream is None:
+            stream = PreselectStream(app.state.camera, cur_presel, cur_roi, cur_bit_depth)
+        return stream
+
+    def stop_stream() -> None:
+        nonlocal stream
+        if stream is not None:
+            stream.stop()
+            stream = None
+
     async def produce() -> tuple[bytes, dict, float]:
         """Capture + encode one frame and build the full WS message."""
         t0 = loop.time()
@@ -348,21 +474,29 @@ async def ws_raw(websocket: WebSocket) -> None:
         cur_roi, cur_bit_depth, cur_format, cur_presel = roi, bit_depth, img_format, presel
         cur_compression = compression if cur_format == "raw" else "none"
 
-        # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
-        # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
-        # matériellement — voir _capture_and_encode_isp).
-        # Une seule capture à la fois, tous clients /ws/raw confondus :
-        # deux flux capturant en parallèle ont figé la caméra
-        # (« Camera frontend has timed out », threads bloqués).
-        async with _capture_lock:
-            if cur_format == "raw":
-                payload, h, w, timing = await loop.run_in_executor(
-                    None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression, cur_presel
-                )
-            else:
-                payload, h, w, timing = await loop.run_in_executor(
-                    None, _capture_and_encode_isp, camera, cur_roi, cur_format, cur_presel
-                )
+        if cur_format == "raw" and cur_presel is not None:
+            # Présélection RAW : pas de capture ici, les images arrivent par
+            # le callback caméra (PreselectStream) — thread pool, attente comprise.
+            payload, h, w, timing = await loop.run_in_executor(
+                None, preselect_stream(cur_presel, cur_roi, cur_bit_depth).next_payload, cur_compression
+            )
+        else:
+            stop_stream()
+            # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
+            # RAW (Bayer, débayerisé client-side) ou ISP JPEG/PNG (déjà débayerisé
+            # matériellement — voir _capture_and_encode_isp).
+            # Une seule capture à la fois, tous clients /ws/raw confondus :
+            # deux flux capturant en parallèle ont figé la caméra
+            # (« Camera frontend has timed out », threads bloqués).
+            async with _capture_lock:
+                if cur_format == "raw":
+                    payload, h, w, timing = await loop.run_in_executor(
+                        None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression
+                    )
+                else:
+                    payload, h, w, timing = await loop.run_in_executor(
+                        None, _capture_and_encode_isp, camera, cur_roi, cur_format, cur_presel
+                    )
 
         meta_json = json.dumps({
             # Legacy fields — kept for RPiCamera2 / minicam.py compat
@@ -385,7 +519,8 @@ async def ws_raw(websocket: WebSocket) -> None:
             # Présélection : score de l'image envoyée, images capturées/envoyées
             # depuis le début (ou le dernier changement de ROI/format)
             **({"presel_keep": cur_presel.keep, "presel_score": timing["presel_score"],
-                "presel_analyzed": cur_presel.analyzed, "presel_sent": cur_presel.sent}
+                "presel_analyzed": cur_presel.analyzed, "presel_sent": cur_presel.sent,
+                "presel_skipped": cur_presel.skipped}
                if cur_presel is not None else {}),
         }).encode()
 
@@ -490,6 +625,7 @@ async def ws_raw(websocket: WebSocket) -> None:
             # finir (quelques ms) et on jette son image.
             _orphans.add(pending)
             pending.add_done_callback(_discard_orphan)
+        stop_stream()
         before = app.state.raw_clients
         app.state.raw_clients = max(0, app.state.raw_clients - 1)
         log.info("[ws/raw] client DISCONNECTED — raw_clients %d→%d", before, app.state.raw_clients)

@@ -500,7 +500,8 @@ elPreselect.addEventListener('change', () => stacker?.setPreselect(parseFloat(el
 function preselLine() {
     const m = view()?.lastMeta;
     if (!m?.presel_analyzed) return '';
-    return `\nPi : ${m.presel_sent} envoyées / ${m.presel_analyzed} analysées (garde ${Math.round(m.presel_keep * 100)} %)`;
+    const skipped = m.presel_skipped ? `, ${m.presel_skipped} non analysées` : '';
+    return `\nPi : ${m.presel_sent} envoyées / ${m.presel_analyzed} analysées${skipped} (garde ${Math.round(m.presel_keep * 100)} %)`;
 }
 
 function updateRawRows() {
