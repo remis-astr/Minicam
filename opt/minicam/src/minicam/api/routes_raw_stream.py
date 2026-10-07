@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import struct
 import time
+from collections import deque
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from minicam.api import zstd
@@ -59,19 +62,101 @@ def _black_level(meta, camera=None) -> float | None:
     return float(fallback) if fallback else None
 
 
+class Preselector:
+    """Présélection Lucky Stack sur le Pi : chaque image capturée reçoit un
+    score de netteté, seules les meilleures (fraction `keep`) sont envoyées.
+    La liaison (Wi-Fi surtout) n'a plus à transporter les images que le
+    navigateur aurait de toute façon rejetées, le capteur peut tourner plus
+    vite qu'elle. Même règle que la sélection du navigateur (stacker.js) :
+    seuil = percentile (1 - keep) des 50 derniers scores, les 5 premières
+    images passent le temps de calibrer.
+
+    Utilisé sous _capture_lock (une capture à la fois) : pas de verrou ici.
+    """
+    WINDOW = 50
+
+    def __init__(self, keep: float) -> None:
+        self.keep = keep
+        self.scores: deque[float] = deque(maxlen=self.WINDOW)
+        self.analyzed = 0
+        self.sent = 0
+        # Au-delà, l'image la plus nette des essais part quand même : le flux
+        # ne doit jamais caler (seeing qui se dégrade, scène qui change).
+        self.max_tries = max(2, math.ceil(3 / keep))
+
+    def accepts(self, score: float) -> bool:
+        self.analyzed += 1
+        self.scores.append(score)
+        if len(self.scores) < 5:
+            return True
+        ranked = sorted(self.scores)
+        idx = max(0, math.floor((1 - self.keep) * len(ranked)) - 1)
+        return score >= ranked[idx]
+
+
+def _laplacian_var(plane: np.ndarray) -> float:
+    """Variance du Laplacien : score de netteté (même famille que celui du
+    navigateur), ~2 ms pour un plan 320×240 sur un cœur du Pi Zero 2 W."""
+    lap = cv2.Laplacian(np.asarray(plane, dtype=np.float32), cv2.CV_32F, ksize=3)
+    return float(cv2.meanStdDev(lap)[1][0, 0]) ** 2
+
+
+def _green_msb8(raw: np.ndarray, bits: int, box: tuple[int, int, int, int], bayer: str) -> np.ndarray:
+    """Un des deux plans verts de la boîte du ROI (demi-résolution, une seule
+    couleur : pas de motif Bayer dans le Laplacien), en 8 bits de poids fort
+    lus directement dans le RAW compressé, comme raw_msb8 — sans rien
+    décompresser : ~1 ms en 640×480 sur le Pi Zero 2 W, contre ~20 ms pour
+    décompresser la boîte en 16 bits, ce qui faisait rater des images au
+    capteur. La boîte a des décalages pairs (_center_box) : phase conservée."""
+    x0, y0, w, h = box
+    gx = 0 if bayer[0] == "G" else 1
+    group_px, group_bytes = (4, 5) if bits == 10 else (2, 3)
+    px = np.arange(x0 + gx, x0 + w, 2)
+    cols = (px // group_px) * group_bytes + px % group_px
+    return np.take(raw[y0:y0 + h:2], cols, axis=1)
+
+
+def _select(capture, score, presel: Preselector | None):
+    """Capture jusqu'à une image retenue par `presel` (une seule capture
+    sans présélection). Renvoie (image, score, essais)."""
+    if presel is None:
+        return capture(), None, 1
+    best = None
+    for tries in range(1, presel.max_tries + 1):
+        item = capture()
+        s = score(item)
+        if presel.accepts(s):
+            presel.sent += 1
+            return item, s, tries
+        if best is None or s > best[1]:
+            best = (item, s)
+    presel.sent += 1
+    return best[0], best[1], presel.max_tries
+
+
 def _capture_and_encode(
     camera,
     roi: tuple[int, int] | None = None,
     bit_depth: int = 16,
     compression: str = "none",
+    presel: Preselector | None = None,
 ) -> tuple[bytes, int, int, dict]:
     """Capture + unpack + crop ROI centré + encode — thread pool, jamais asyncio.
-    compression="zstd" : charge utile compressée sans perte (trame zstd)."""
+    compression="zstd" : charge utile compressée sans perte (trame zstd).
+    presel : présélection par netteté (voir Preselector)."""
     t_cap = time.monotonic()
-    raw_arr, meta = camera.capture_raw()
-    t_unpack = time.monotonic()
     bits = camera.raw_bits
-    box = _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
+
+    def capture():
+        raw_arr, meta = camera.capture_raw()
+        return raw_arr, meta, _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
+
+    def score(item) -> float:
+        raw_arr, _meta, box = item
+        return _laplacian_var(_green_msb8(raw_arr, bits, box, camera.bayer_pattern))
+
+    (raw_arr, meta, box), sharpness, tries = _select(capture, score, presel)
+    t_unpack = time.monotonic()
     if bit_depth == 8:
         # MSB bytes gathered straight from the packed frame, ROI included —
         # same bytes as the top byte of the left-shifted 16-bit unpack.
@@ -96,6 +181,8 @@ def _capture_and_encode(
         "tobytes_ms": (t_compress - t_tobytes) * 1000,
         "compress_ms": (t_done - t_compress) * 1000,
         "payload_bytes": len(payload),
+        "presel_score": sharpness,
+        "presel_tries": tries,
     }
     return payload, h, w, timing
 
@@ -104,6 +191,7 @@ def _capture_and_encode_isp(
     camera,
     roi: tuple[int, int] | None = None,
     img_format: str = "jpeg",
+    presel: Preselector | None = None,
 ) -> tuple[bytes, int, int, dict]:
     """Capture the ISP-processed ("main") RGB frame, crop ROI centré, encode
     as JPEG/PNG — thread pool, jamais asyncio. Sibling of _capture_and_encode
@@ -119,7 +207,11 @@ def _capture_and_encode_isp(
     # picamera2's "RGB888" format is actually byte-order BGR, matching what
     # cv2.imencode expects directly — no cvtColor needed (see routes_preview.py,
     # which already relies on this for the live JPEG preview).
-    frame = camera.capture_frame()
+    def score(frame) -> float:
+        # canal vert (BGR), un pixel sur deux : même échelle que le RAW
+        return _laplacian_var(_center_crop(frame, roi)[0::2, 0::2, 1])
+
+    frame, sharpness, tries = _select(camera.capture_frame, score, presel)
     t_capture_done = time.monotonic()
     frame = _center_crop(frame, roi)
     h, w = frame.shape[0], frame.shape[1]
@@ -135,6 +227,8 @@ def _capture_and_encode_isp(
         "unpack_ms": 0.0,
         "tobytes_ms": (t_done - t_capture_done) * 1000,
         "payload_bytes": len(payload),
+        "presel_score": sharpness,
+        "presel_tries": tries,
     }
     return payload, h, w, timing
 
@@ -166,11 +260,13 @@ async def ws_raw(websocket: WebSocket) -> None:
     img_format = "raw"
     # Compression sans perte du RAW (optionnelle) : "none" = historique.
     compression = "none"
+    # Présélection par netteté sur le Pi (optionnelle) : None = tout envoyer.
+    presel: Preselector | None = None
     loop = asyncio.get_event_loop()
     _frame_count = 0
 
     async def recv_loop() -> None:
-        nonlocal fps, running, roi, bit_depth, img_format, credits, compression
+        nonlocal fps, running, roi, bit_depth, img_format, credits, compression, presel
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -192,6 +288,8 @@ async def ws_raw(websocket: WebSocket) -> None:
                         rh = int(msg["h"]) if msg.get("h") else None
                         roi = (rw & ~1, rh & ~1) if (rw and rh and rw > 0 and rh > 0) else None
                         log.info("[ws/raw] ROI → %s", roi)
+                        if presel is not None:   # scores d'une autre taille : nouvelle fenêtre
+                            presel = Preselector(presel.keep)
                     except (KeyError, ValueError, TypeError):
                         pass
                 elif msg.get("cmd") == "set_bitdepth":
@@ -205,6 +303,16 @@ async def ws_raw(websocket: WebSocket) -> None:
                     fmt = msg.get("format", "raw")
                     img_format = fmt if fmt in ("raw", "jpeg", "png") else "raw"
                     log.info("[ws/raw] format → %s", img_format)
+                    if presel is not None:
+                        presel = Preselector(presel.keep)
+                elif msg.get("cmd") == "set_preselect":
+                    # keep = fraction envoyée (0 < keep < 1) ; 0, 1 ou absent = désactivée
+                    try:
+                        keep = float(msg.get("keep") or 0)
+                    except (ValueError, TypeError):
+                        keep = 0.0
+                    presel = Preselector(keep) if 0 < keep < 1 else None
+                    log.info("[ws/raw] présélection → %s", f"{keep:.0%}" if presel else "désactivée")
                 elif msg.get("cmd") == "set_compression":
                     codec = msg.get("codec", "none")
                     if codec == "zstd" and not zstd.available():
@@ -237,7 +345,7 @@ async def ws_raw(websocket: WebSocket) -> None:
         # a real, observed bug during testing, not just a theoretical
         # race (caught e.g. a "format":"raw" frame whose payload was
         # still PNG bytes from the previous setting).
-        cur_roi, cur_bit_depth, cur_format = roi, bit_depth, img_format
+        cur_roi, cur_bit_depth, cur_format, cur_presel = roi, bit_depth, img_format, presel
         cur_compression = compression if cur_format == "raw" else "none"
 
         # Capture + encode dans le thread pool (ne bloque pas l'event loop) —
@@ -249,11 +357,11 @@ async def ws_raw(websocket: WebSocket) -> None:
         async with _capture_lock:
             if cur_format == "raw":
                 payload, h, w, timing = await loop.run_in_executor(
-                    None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression
+                    None, _capture_and_encode, camera, cur_roi, cur_bit_depth, cur_compression, cur_presel
                 )
             else:
                 payload, h, w, timing = await loop.run_in_executor(
-                    None, _capture_and_encode_isp, camera, cur_roi, cur_format
+                    None, _capture_and_encode_isp, camera, cur_roi, cur_format, cur_presel
                 )
 
         meta_json = json.dumps({
@@ -274,6 +382,11 @@ async def ws_raw(websocket: WebSocket) -> None:
             "compression": cur_compression,
             "black_level": timing.get("black_level"),
             "ts": t0,
+            # Présélection : score de l'image envoyée, images capturées/envoyées
+            # depuis le début (ou le dernier changement de ROI/format)
+            **({"presel_keep": cur_presel.keep, "presel_score": timing["presel_score"],
+                "presel_analyzed": cur_presel.analyzed, "presel_sent": cur_presel.sent}
+               if cur_presel is not None else {}),
         }).encode()
 
         # Pad JSON to even length so rawOffset = 4+jsonLen is Uint16-aligned
