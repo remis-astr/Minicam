@@ -5,12 +5,38 @@ import threading
 import time
 from typing import Any
 
+import cv2
 from picamera2 import Picamera2
 
 from minicam.config import load_config, read_state, write_state
 from minicam.camera.sensors import bits_from_format, get_sensor_profile
 
 log = logging.getLogger(__name__)
+
+# Au-delà de cette taille, "main" passe en YUV420 avec 2 buffers : en RGB888
+# (3 o/px) un seul buffer natif IMX477 fait 37 Mo, et ni 4 ni même 2 buffers
+# ne s'allouent dans le CMA du Pi Zero 2 W (mesuré : ~135 Mo libres au boot,
+# EBUSY/ENOMEM même à 2 buffers). En YUV420 (1,5 o/px), 2 buffers passent.
+# Les captures sont reconverties en BGR dans _main_to_bgr(), donc les
+# appelants voient toujours le même tableau qu'en RGB888.
+_LARGE_MAIN_PIXELS = 5_000_000
+
+
+def _main_stream_params(size: tuple[int, int], buffer_count: int) -> tuple[str, int]:
+    if size[0] * size[1] > _LARGE_MAIN_PIXELS:
+        return "YUV420", min(buffer_count, 2)
+    return "RGB888", buffer_count
+
+
+def _main_to_bgr(main_config: dict[str, Any], arr: Any) -> Any:
+    """Tableau "main" capturé -> BGR (h, w, 3), quel que soit le format du flux.
+
+    Le stride YUV420 est aligné (4096 pour 4056 px de large) : les colonnes
+    de padding sont du bruit vert et sont retirées après conversion."""
+    if main_config["format"] != "YUV420":
+        return arr
+    width = main_config["size"][0]
+    return cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_I420)[:, :width]
 
 
 class CameraController:
@@ -78,8 +104,9 @@ class CameraController:
             # real ISP crop) — unlike RAW, which has no such lever and needs
             # _apply_width_crop after capture instead.
             main_size = self.raw_size
+        main_format, buffer_count = _main_stream_params(main_size, buffer_count)
         return self._picam2.create_video_configuration(  # type: ignore[union-attr]
-            main={"format": "RGB888", "size": main_size},
+            main={"format": main_format, "size": main_size},
             raw={"format": raw_format, "size": raw_size},
             display=None,
             buffer_count=buffer_count,
@@ -120,8 +147,9 @@ class CameraController:
         independent of the currently selected `raw_mode` crop — used only by
         the full-res still/timelapse paths, never by the fast preview loop.
         """
+        main_format, buffer_count = _main_stream_params(self.profile.raw_size, buffer_count)
         return self._picam2.create_video_configuration(  # type: ignore[union-attr]
-            main={"format": "RGB888", "size": self.profile.raw_size},
+            main={"format": main_format, "size": self.profile.raw_size},
             raw={"format": self.profile.raw_format, "size": self.profile.raw_size},
             display=None,
             buffer_count=buffer_count,
@@ -234,6 +262,12 @@ class CameraController:
         self._persist()
         log.info("Raw mode set to %s", self.raw_mode)
 
+    def reset_mode_to_default(self) -> None:
+        """Revenir (caméra fermée) au mode par défaut, persisté pour le
+        prochain démarrage — repli quand le mode mémorisé ne s'alloue pas."""
+        self.raw_mode = self.profile.raw_modes[0].name
+        self._persist()
+
     def set_isp_controls(
         self,
         contrast: float,
@@ -325,9 +359,10 @@ class CameraController:
             restore_gain = self.gain
             restore_exp_us = self.exposure_us
             restore_fd = self._frame_duration_us(self.exposure_us)
+            main_config = p.camera_config["main"]
         # Blocking calls outside the lock
         p.capture_array("main")  # discard — wait for settings to apply
-        frame = p.capture_array("main")
+        frame = _main_to_bgr(main_config, p.capture_array("main"))
         with self._lock:
             if self._picam2 is p:
                 p.set_controls({
@@ -372,7 +407,7 @@ class CameraController:
                 p.set_controls(controls)
                 p.start()
                 p.capture_array("main")  # discard — let the new mode settle
-                frame = p.capture_array("main")
+                frame = _main_to_bgr(p.camera_config["main"], p.capture_array("main"))
             finally:
                 # Must always leave the camera back in its preview config,
                 # started — a bare `stop()`/`configure()` sequence without
@@ -486,7 +521,8 @@ class CameraController:
             if not self._picam2:
                 raise RuntimeError("Camera not open")
             p = self._picam2
-        return p.capture_array("main")
+            main_config = p.camera_config["main"]
+        return _main_to_bgr(main_config, p.capture_array("main"))
 
     def status(self) -> dict[str, Any]:
         return {

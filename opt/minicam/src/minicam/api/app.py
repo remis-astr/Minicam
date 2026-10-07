@@ -99,6 +99,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             else:
                 log.warning("Échec d'allocation CMA — relance du processus (%d/%d)",
                             retries + 1, _CMA_MAX_RETRIES)
+                # Dernière relance : un mode mémorisé trop gros pour le CMA
+                # échouerait à chaque démarrage, on retente au mode par défaut.
+                default_mode = camera.profile.raw_modes[0].name
+                if retries + 1 == _CMA_MAX_RETRIES and camera.raw_mode != default_mode:
+                    log.warning("Mode %s non allouable — repli sur %s", camera.raw_mode, default_mode)
+                    camera.reset_mode_to_default()
                 raise RuntimeError("CMA alloc failed, restart for a fresh CMA state") from exc
     else:
         _CMA_RETRY_PATH.unlink(missing_ok=True)
