@@ -10,7 +10,7 @@ import cv2
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from minicam.api import zstd
-from minicam.api.routes_capture import raw_msb8, unpack_raw
+from minicam.api.routes_capture import raw_msb8, unpack_raw_box
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,14 +71,14 @@ def _capture_and_encode(
     raw_arr, meta = camera.capture_raw()
     t_unpack = time.monotonic()
     bits = camera.raw_bits
+    box = _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
     if bit_depth == 8:
         # MSB bytes gathered straight from the packed frame, ROI included —
         # same bytes as the top byte of the left-shifted 16-bit unpack.
-        box = _center_box(camera.raw_size[0], raw_arr.shape[0], roi)
         data = raw_msb8(raw_arr, bits, *box)
     else:
-        data = (unpack_raw(raw_arr, bits, camera.raw_size[0]) << (16 - bits)).astype("uint16")
-        data = _center_crop(data, roi)
+        # Seulement la boîte du ROI est décompressée (unpack_raw_box)
+        data = (unpack_raw_box(raw_arr, bits, *box) << (16 - bits)).astype("uint16")
 
     h, w = data.shape
     t_tobytes = time.monotonic()

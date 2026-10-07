@@ -99,6 +99,26 @@ def unpack_raw(raw: np.ndarray, bits: int, width: int) -> np.ndarray:
     raise ValueError(f"profondeur RAW non supportée: {bits} bits")
 
 
+def unpack_raw_box(
+    raw: np.ndarray, bits: int, x0: int, y0: int, width: int, height: int
+) -> np.ndarray:
+    """`unpack_raw(...)[y0:y0+height, x0:x0+width]` sans décompresser le reste
+    de l'image : seuls les groupes de packing (2 px/3 octets en 12 bits,
+    4 px/5 octets en 10 bits) qui couvrent la boîte sont décompressés.
+    Mesuré sur le Pi Zero 2 W, ROI 640×480 dans 2028×1080 en 10 bits :
+    ~100 ms en décompressant toute l'image puis en découpant."""
+    if bits == 12:
+        group_px, group_bytes = 2, 3
+    elif bits == 10:
+        group_px, group_bytes = 4, 5
+    else:
+        raise ValueError(f"profondeur RAW non supportée: {bits} bits")
+    gx0 = x0 // group_px * group_px
+    gx1 = -(-(x0 + width) // group_px) * group_px
+    packed = raw[y0:y0 + height, gx0 // group_px * group_bytes:gx1 // group_px * group_bytes]
+    return unpack_raw(packed, bits, gx1 - gx0)[:, x0 - gx0:x0 - gx0 + width]
+
+
 # OpenCV's Bayer conversion codes are named after the *second* row of the
 # pattern, not the first — so they're inverted relative to the usual
 # top-left-pixel convention used everywhere else in this codebase (FITS
