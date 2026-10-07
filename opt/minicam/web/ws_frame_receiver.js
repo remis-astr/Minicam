@@ -142,6 +142,16 @@ export class WsFrameReceiver {
             this._ws.send(JSON.stringify({ cmd: 'set_compression', codec }));
     }
 
+    /**
+     * Présélection par netteté sur le Pi : seule la fraction `keep` (0–1) des
+     * images capturées, les plus nettes, est envoyée. 0 = désactivée.
+     */
+    setPreselect(keep) {
+        this._preselect = keep;
+        if (this._ws?.readyState === WebSocket.OPEN)
+            this._ws.send(JSON.stringify({ cmd: 'set_preselect', keep }));
+    }
+
     /** Envoie une commande JSON quelconque sur le WebSocket. */
     sendCommand(cmd) {
         if (this._ws?.readyState === WebSocket.OPEN)
@@ -180,6 +190,8 @@ export class WsFrameReceiver {
                     ws.send(JSON.stringify({ cmd: 'set_format', format: this._initialFormat }));
                 if (this._initialCompression != null)
                     ws.send(JSON.stringify({ cmd: 'set_compression', codec: this._initialCompression }));
+                if (this._preselect)
+                    ws.send(JSON.stringify({ cmd: 'set_preselect', keep: this._preselect }));
                 // Crédits envoyés en dernier : les réglages ci-dessus s'appliquent
                 // dès la première image capturée.
                 this._queue = [];

@@ -412,6 +412,9 @@ export class StreamingStacker extends EventTarget {
         this._initialBitDepth  = options.bitDepth ?? null;
         this._initialFormat    = options.format ?? 'raw';
         this._initialCompression = options.compression ?? null;
+        // Présélection par netteté sur le Pi (fraction envoyée, 0 = aucune)
+        this._preselect        = options.preselect ?? 0;
+        this.lastMeta          = null;
         this._stretchLow       = options.stretchLow  ?? 0.001;
         this._stretchHigh      = options.stretchHigh ?? 0.999;
         this._stretchBeta      = options.stretchBeta ?? 0;
@@ -535,6 +538,7 @@ export class StreamingStacker extends EventTarget {
         this._receiver = typeof wsUrl === 'string' ? new WsFrameReceiver(wsUrl) : wsUrl;
         if (typeof wsUrl === 'string') this._receiver.setFlowControl(this._flowCredits);
         this._receiver.onFrame = (pixels, meta) => this._onFrame(pixels, meta);
+        this._receiver.setPreselect?.(this._preselect);   // sources fichier : sans objet
         await this._receiver.start(this._targetFps, this._initialRoi, this._initialBitDepth, this._initialFormat,
                                    this._initialCompression);
     }
@@ -679,6 +683,12 @@ export class StreamingStacker extends EventTarget {
 
     flush(n = 3) { this._receiver?.flush(n); }
 
+    /** Présélection sur le Pi : fraction des images envoyées (0 = toutes). */
+    setPreselect(keep) {
+        this._preselect = keep;
+        this._receiver?.setPreselect?.(keep);
+    }
+
     /** Compression du RAW : 'none' ou 'zstd' (sans perte). */
     setCompression(codec) {
         this._initialCompression = codec;
@@ -756,6 +766,7 @@ export class StreamingStacker extends EventTarget {
     async _processFrame(pixels, meta) {
         const { width: srcW, height: srcH, gain, exposure_ms, bayer, bit_depth: bitDepth = 16,
                 format = 'raw' } = meta;
+        this.lastMeta = meta;   // compteurs de présélection du Pi, entre autres
         const cropSize     = srcW;
         const bayerPattern = BAYER_INT[bayer] ?? 0;
         const frameIdx     = this._frameIndex++;

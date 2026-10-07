@@ -516,20 +516,41 @@ function demosaicBlend(acc, w, h, cmap, wTyp) {
         return mos[y * w + x];
     };
     const conv = (k, x, y) => { let s = 0; for (const [dx, dy, v] of k) s += v * at(x + dx, y + dy); return s / 8; };
+    // Mêmes noyaux MHC déroulés, en indices directs : à 2 px ou plus du bord
+    // aucun miroir n'est nécessaire. conv() générique (une closure et un test
+    // de bord par échantillon) prenait ~15 s par aperçu en 4056×2160 et
+    // espaçait les aperçus du Live Stack de plus de 30 s.
+    const m = mos, w2 = 2 * w;
+    const gI = (p) => (4 * m[p] + 2 * (m[p - 1] + m[p + 1] + m[p - w] + m[p + w])
+                       - (m[p - 2] + m[p + 2] + m[p - w2] + m[p + w2])) / 8;
+    const rowI = (p) => (5 * m[p] + 4 * (m[p - 1] + m[p + 1]) - (m[p - 2] + m[p + 2])
+                         - (m[p + w + 1] + m[p + w - 1] + m[p - w + 1] + m[p - w - 1])
+                         + 0.5 * (m[p + w2] + m[p - w2])) / 8;
+    const colI = (p) => (5 * m[p] + 4 * (m[p + w] + m[p - w]) - (m[p + w2] + m[p - w2])
+                         - (m[p + w + 1] + m[p + w - 1] + m[p - w + 1] + m[p - w - 1])
+                         + 0.5 * (m[p + 2] + m[p - 2])) / 8;
+    const diagI = (p) => (6 * m[p] + 2 * (m[p + w + 1] + m[p + w - 1] + m[p - w + 1] + m[p - w - 1])
+                          - 1.5 * (m[p + 2] + m[p - 2] + m[p + w2] + m[p - w2])) / 8;
     const w0 = wTyp.map((v) => 0.05 * v);
     const out = new Float32Array(n * 4);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        const p = y * w + x, nat = colorAt(cmap, x, y);
-        for (let c = 0; c < 3; c++) {
-            const wc = acc[6 * p + 3 + c];
-            let f;
-            if (c === nat) f = mos[p];
-            else if (c === 1) f = conv(MHC.g, x, y);                       // G en R/B
-            else if (nat === 1) f = conv(colorAt(cmap, x + 1, y) === c ? MHC.row : MHC.col, x, y);
-            else f = conv(MHC.diag, x, y);                                 // R en B, B en R
-            out[4 * p + c] = wc > 0 ? (acc[6 * p + c] + w0[c] * f) / (wc + w0[c]) : f;
+    for (let y = 0; y < h; y++) {
+        const innerY = y >= 2 && y < h - 2;
+        for (let x = 0; x < w; x++) {
+            const p = y * w + x, nat = colorAt(cmap, x, y);
+            const inner = innerY && x >= 2 && x < w - 2;
+            for (let c = 0; c < 3; c++) {
+                const wc = acc[6 * p + 3 + c];
+                let f;
+                if (c === nat) f = mos[p];
+                else if (c === 1) f = inner ? gI(p) : conv(MHC.g, x, y);  // G en R/B
+                else if (nat === 1) {
+                    const row = colorAt(cmap, x + 1, y) === c;
+                    f = inner ? (row ? rowI(p) : colI(p)) : conv(row ? MHC.row : MHC.col, x, y);
+                } else f = inner ? diagI(p) : conv(MHC.diag, x, y);      // R en B, B en R
+                out[4 * p + c] = wc > 0 ? (acc[6 * p + c] + w0[c] * f) / (wc + w0[c]) : f;
+            }
+            out[4 * p + 3] = Math.min(1, acc[6 * p + 4] / wTyp[1]);
         }
-        out[4 * p + 3] = Math.min(1, acc[6 * p + 4] / wTyp[1]);
     }
     return out;
 }

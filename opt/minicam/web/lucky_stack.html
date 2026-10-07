@@ -105,6 +105,16 @@
     </div>
 
     <div class="control-row control-row--inline">
+      <label for="preselect-select" title="Le Pi mesure la netteté de chaque image et n'envoie que les meilleures : la liaison (Wi-Fi surtout) ne transporte plus les images rejetées, le capteur peut tourner plus vite qu'elle. Utile quand la liaison limite le débit ; une image écartée par le Pi est perdue.">Présélection Pi</label>
+      <select id="preselect-select">
+        <option value="0" selected>Désactivée</option>
+        <option value="0.5">50 % envoyées</option>
+        <option value="0.25">25 % envoyées</option>
+        <option value="0.1">10 % envoyées</option>
+      </select>
+    </div>
+
+    <div class="control-row control-row--inline">
       <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
       <select id="mode-select"><option value="">—</option></select>
     </div>
@@ -483,6 +493,17 @@ const elCompression    = document.getElementById('compression-select');
 const elCompressionRow = document.getElementById('compression-row');
 elCompression.addEventListener('change', () => stacker?.setCompression(elCompression.value));
 
+const elPreselect = document.getElementById('preselect-select');
+elPreselect.addEventListener('change', () => stacker?.setPreselect(parseFloat(elPreselect.value)));
+
+// « Pi : envoyées / capturées » quand la présélection est active
+function preselLine() {
+    const m = view()?.lastMeta;
+    if (!m?.presel_analyzed) return '';
+    const skipped = m.presel_skipped ? `, ${m.presel_skipped} non analysées` : '';
+    return `\nPi : ${m.presel_sent} envoyées / ${m.presel_analyzed} analysées${skipped} (garde ${Math.round(m.presel_keep * 100)} %)`;
+}
+
 function updateRawRows() {
     elBitDepthRow.classList.toggle('hidden', elFormat.value !== 'raw');
     elCompressionRow.classList.toggle('hidden', elFormat.value !== 'raw');
@@ -525,7 +546,8 @@ function updateStats() {
         elStats.textContent =
             `Pool élite : ${el.size} / ${el.capacity} images  |  vues : ${totalSeen}\n` +
             `Score : ${v.lastSharpness.toFixed(4)}  |  Seuil du pool : ${el.minScore.toFixed(4)}\n` +
-            `Remplacements : ${el.replaced}  |  Mémoire : ${(el.bytes / 2 ** 20).toFixed(0)} Mo  |  Exposition : ${expS} s`;
+            `Remplacements : ${el.replaced}  |  Mémoire : ${(el.bytes / 2 ** 20).toFixed(0)} Mo  |  Exposition : ${expS} s`
+            + preselLine();
         return;
     }
     const sc     = stacker?.stackedCount ?? 0;
@@ -537,7 +559,7 @@ function updateStats() {
     elStats.textContent =
         `Acceptées : ${sc} / ${totalSeen}  (${rate} %)\n` +
         `Score : ${score}  |  Seuil adaptatif : ${thresh}\n` +
-        `Exposition : ${expS} s  |  Gain moy. : ${gainM}`;
+        `Exposition : ${expS} s  |  Gain moy. : ${gainM}` + preselLine();
 }
 
 // Start stacking
@@ -578,6 +600,7 @@ btnStart.addEventListener('click', async () => {
             roi:              parseRoi(elRoi.value),
             format:           elFormat.value,
             compression:      elCompression.value,
+            preselect:        parseFloat(elPreselect.value),
             awb:              elAwb.checked,
             stretchLow:       parseFloat(elStretchLo.value) / 100,
             stretchHigh:      parseFloat(elStretchHi.value) / 100,
