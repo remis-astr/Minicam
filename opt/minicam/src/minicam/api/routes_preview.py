@@ -16,6 +16,27 @@ router = APIRouter()
 BOUNDARY = b"--frame"
 MJPEG_QUALITY = 70
 TARGET_FPS = 15
+# L'aperçu n'est affiché que sur un canevas à la taille de l'écran : inutile
+# d'encoder en JPEG les 12 Mpx du mode natif IMX477 (0,4-4 s par image sur le
+# Pi Zero, CPU saturé). Les stacks (/ws/raw), photos et timelapse capturent
+# de leur côté et gardent la pleine résolution.
+PREVIEW_MAX_WIDTH = 2028
+
+
+def _downscale_for_preview(frame):
+    h, w = frame.shape[:2]
+    if w <= PREVIEW_MAX_WIDTH:
+        return frame
+    scale = PREVIEW_MAX_WIDTH / w
+    return cv2.resize(frame, (PREVIEW_MAX_WIDTH, round(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _capture_preview_jpeg(camera: Any) -> bytes | None:
+    """Capture + réduction + encodage, dans le thread pool : l'encodage JPEG
+    ne doit pas bloquer la boucle asyncio (HTTP et WebSockets)."""
+    frame = _downscale_for_preview(camera.capture_frame())
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
+    return buf.tobytes() if ok else None
 
 
 async def _capture_loop(camera: Any, state: Any) -> None:
@@ -36,10 +57,9 @@ async def _capture_loop(camera: Any, state: Any) -> None:
             continue
         t0 = asyncio.get_event_loop().time()
         try:
-            frame = await asyncio.get_event_loop().run_in_executor(None, camera.capture_frame)
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
-            if ok:
-                state.last_preview_jpeg = buf.tobytes()
+            jpeg = await asyncio.get_event_loop().run_in_executor(None, _capture_preview_jpeg, camera)
+            if jpeg is not None:
+                state.last_preview_jpeg = jpeg
         except Exception as e:
             log.warning("Capture loop error: %s", e)
             await asyncio.sleep(0.5)

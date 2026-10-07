@@ -42,12 +42,21 @@ function setControls(enabled) {
 // --- WebSocket ---
 
 function connect() {
-  if (ws) ws.close();
+  clearTimeout(reconnectTimer);
+  if (ws) {
+    // Détacher l'ancien socket avant de le fermer : sinon son onclose
+    // replanifie un connect() qui fermera le nouveau, et ainsi de suite
+    // (reconnexion toutes les 5 s, avec une boucle d'aperçu de plus à
+    // chaque indi_status reçu).
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    ws.close();
+  }
   elStatus.className  = 'badge connecting';
   elStatus.textContent = 'Connexion…';
   setControls(false);
 
-  ws = new WebSocket(WS_URL);
+  const sock = new WebSocket(WS_URL);
+  ws = sock;
 
   ws.onopen = () => {
     elStatus.className  = 'badge connected';
@@ -134,7 +143,7 @@ function connect() {
     reconnectTimer = setTimeout(connect, 5000);
   };
 
-  ws.onerror = () => ws.close();
+  ws.onerror = () => sock.close();
 }
 
 function send(obj) {
@@ -229,6 +238,7 @@ elReconnect.addEventListener('click', () => {
 const elPreviewCanvas = document.getElementById('preview-canvas');
 const previewCtx      = elPreviewCanvas.getContext('2d');
 let   previewRunning  = false;
+let   previewLoopActive = false;  // une seule boucle à la fois
 
 function resizePreviewCanvas() {
   const w = elPreviewBox.clientWidth;
@@ -241,19 +251,32 @@ function resizePreviewCanvas() {
 
 async function runPreview() {
   previewRunning = true;
+  if (previewLoopActive) return;  // la boucle en cours reprend d'elle-même
+  previewLoopActive = true;
+  try {
+    await previewLoop();
+  } finally {
+    previewLoopActive = false;
+  }
+}
+
+async function previewLoop() {
   while (previewRunning) {
     const t0 = performance.now();
+    let period = 100;  // cible ~10 fps
     try {
       const resp = await fetch('/preview_frame.jpg');
-      if (resp.ok) {
+      if (!resp.ok) {
+        period = 1000;  // 503 = pas encore d'image (caméra indisponible)
+      } else {
         const blob = await resp.blob();
         const bmp  = await createImageBitmap(blob);
         resizePreviewCanvas();
         previewCtx.drawImage(bmp, 0, 0, elPreviewCanvas.width, elPreviewCanvas.height);
         bmp.close();
       }
-    } catch (e) {}
-    const wait = Math.max(0, 100 - (performance.now() - t0));  // cible ~10 fps
+    } catch (e) { period = 1000; }
+    const wait = Math.max(0, period - (performance.now() - t0));
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
   }
 }
