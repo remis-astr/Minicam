@@ -996,12 +996,17 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
     // Apply search offset for drift tracking (shifts where we search in frames, not where templates come from)
     const offsetX = searchOffset ? Math.round(searchOffset.dx) : 0;
     const offsetY = searchOffset ? Math.round(searchOffset.dy) : 0;
+    // Search centre actually used per AP: clamped into the frame, since the
+    // shader unpacks positions as unsigned 16-bit (a negative one wrapped)
+    const apOffX = new Int32Array(numAPs), apOffY = new Int32Array(numAPs);
 
     for (let i = 0; i < numAPs; i++) {
         const ap = alignmentPoints[i];
         // Search positions are offset by drift, templates are extracted from original positions
-        const searchX = ap.x + offsetX;
-        const searchY = ap.y + offsetY;
+        const searchX = Math.min(Math.max(ap.x + offsetX, 0), width - 1);
+        const searchY = Math.min(Math.max(ap.y + offsetY, 0), height - 1);
+        apOffX[i] = searchX - ap.x;
+        apOffY[i] = searchY - ap.y;
         apPositions[i] = (searchX & 0xFFFF) | ((searchY & 0xFFFF) << 16);
 
         // Extract template from ORIGINAL position (not offset)
@@ -1081,11 +1086,16 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
         const frameShifts = [];
         for (let ap = 0; ap < numAPs; ap++) {
             const baseIdx = (f * numAPs + ap) * 3;
-            const dx = resultsData[baseIdx];
-            const dy = resultsData[baseIdx + 1];
-            const quality = resultsData[baseIdx + 2];
             // Add search offset to get shift relative to original AP position
-            frameShifts.push({ dx: dx + offsetX, dy: dy + offsetY, quality });
+            const dx = resultsData[baseIdx] + apOffX[ap];
+            const dy = resultsData[baseIdx + 1] + apOffY[ap];
+            let quality = resultsData[baseIdx + 2];
+            // Matched patch partly outside the frame (target drifted to the
+            // edge): the shader reads 0 there, the match is not trustworthy
+            const mx = alignmentPoints[ap].x + dx, my = alignmentPoints[ap].y + dy;
+            if (mx - halfPatch < 0 || my - halfPatch < 0 ||
+                mx + halfPatch >= width || my + halfPatch >= height) quality = 0;
+            frameShifts.push({ dx, dy, quality });
         }
         allShifts.push(frameShifts);
     }

@@ -65,35 +65,77 @@ function debayer(data, srcW, srcH, cropX, cropY, cropW, cropH, pattern, bitDepth
     return out;
 }
 
-// ── Variance du Laplacien (sharpness) ──────────────────────────────────────
+// ── Netteté + barycentre du disque ─────────────────────────────────────────
+// Score : écart-type du Laplacien sur l'image réduite 2×2 (somme des 4 pixels)
+// lissée deux fois par [1 2 1], limité au disque (> 30 % du max) et divisé par
+// sa luminosité moyenne. À cette échelle le Laplacien voit les détails de la
+// planète, pas le bruit des pixels ni celui du débayérisage, et la
+// normalisation rend le score insensible à la transparence. Comparé sur 5 SER
+// de Jupiter (RGB et RAW Bayer) au Laplacien pleine résolution, qui ne faisait
+// pas mieux qu'une sélection au hasard. ~0,8 ms en 288×288.
+// center : barycentre du disque en pixels pleine résolution, null quand le
+// disque touche le bord (planète qui sort du cadre, surface lunaire ou
+// solaire) — il ne suivrait plus la dérive et fausserait le recentrage.
 function sharpnessAndGray(rgba, w, h) {
     const n = w * h;
-    const gray = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-        gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+    const gray8 = new Uint8Array(n);
+    const bw = w >> 1, bh = h >> 1;
+    if (bw < 8 || bh < 8) {
+        for (let i = 0; i < n; i++)
+            gray8[i] = (0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2]) * 255 + 0.5;
+        return { sharpness: 0, center: null, gray8 };
     }
 
-    let sum = 0, sq = 0, cnt = 0;
-    for (let y = 1; y < h - 1; y++) {
-        for (let x = 1; x < w - 1; x++) {
-            const lap = -gray[(y - 1) * w + x] - gray[y * w + x - 1]
-                      + 4 * gray[y * w + x]
-                      - gray[y * w + x + 1] - gray[(y + 1) * w + x];
-            sum += lap;
-            sq  += lap * lap;
-            cnt++;
+    // Luminance + réduction 2×2 en une passe
+    let a = new Float32Array(bw * bh), t = new Float32Array(bw * bh);
+    for (let y = 0; y < h; y++) {
+        const by = y >> 1, row = by < bh ? by * bw : -1;
+        for (let x = 0; x < w; x++) {
+            const i = y * w + x;
+            const g = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+            gray8[i] = g * 255 + 0.5;
+            const bx = x >> 1;
+            if (row >= 0 && bx < bw) a[row + bx] += g;
         }
     }
-    const mean = sum / cnt;
-    const sharpness = Math.sqrt(Math.max(0, sq / cnt - mean * mean));
+    // Deux lissages [1 2 1] séparables (bords recopiés)
+    for (let p = 0; p < 2; p++) {
+        for (let y = 0; y < bh; y++) {
+            const o = y * bw;
+            t[o] = a[o]; t[o + bw - 1] = a[o + bw - 1];
+            for (let x = 1; x < bw - 1; x++) t[o + x] = 0.25 * a[o + x - 1] + 0.5 * a[o + x] + 0.25 * a[o + x + 1];
+        }
+        for (let x = 0; x < bw; x++) { a[x] = t[x]; a[(bh - 1) * bw + x] = t[(bh - 1) * bw + x]; }
+        for (let y = 1; y < bh - 1; y++) {
+            const o = y * bw;
+            for (let x = 0; x < bw; x++) a[o + x] = 0.25 * t[o + x - bw] + 0.5 * t[o + x] + 0.25 * t[o + x + bw];
+        }
+    }
 
-    const gray8 = new Uint8Array(n);
-    for (let i = 0; i < n; i++) gray8[i] = gray[i] * 255 + 0.5;
-    return { sharpness, gray8 };
+    let max = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] > max) max = a[i];
+    const thr = 0.3 * max;
+    let sum = 0, sq = 0, sv = 0, cnt = 0, cx = 0, cy = 0, touches = false;
+    for (let y = 1; y < bh - 1; y++) {
+        for (let x = 1; x < bw - 1; x++) {
+            const i = y * bw + x, v = a[i];
+            if (v <= thr) continue;
+            const lap = 4 * v - a[i - 1] - a[i + 1] - a[i - bw] - a[i + bw];
+            sum += lap; sq += lap * lap; sv += v; cnt++;
+            cx += v * x; cy += v * y;
+            if (x <= 2 || y <= 2 || x >= bw - 3 || y >= bh - 3) touches = true;
+        }
+    }
+    if (!cnt || sv <= 0) return { sharpness: 0, center: null, gray8 };
+    const mean = sum / cnt;
+    const sharpness = Math.sqrt(Math.max(0, sq / cnt - mean * mean)) / (sv / cnt);
+    // pixel réduit x couvre les pixels 2x et 2x+1 → centre en 2x + 0,5
+    const center = touches ? null : { x: 2 * cx / sv + 0.5, y: 2 * cy / sv + 0.5 };
+    return { sharpness, center, gray8 };
 }
 
 // ── Décodage JPEG/PNG (déjà débayerisé côté ISP) ───────────────────────────
-// Retourne { sharpness, float32Buffer, packedGrayBuffer, width, height },
+// Retourne { sharpness, center, float32Buffer, packedGrayBuffer, width, height },
 // même forme que le chemin Bayer ci-dessus — décodage via createImageBitmap
 // (dispo dans les module workers) + OffscreenCanvas, pas de debayer() ici.
 async function analyzeImageBytes(bytes, mimeType, cropSize, width, height) {
@@ -117,8 +159,8 @@ async function analyzeImageBytes(bytes, mimeType, cropSize, width, height) {
     const inv  = 1 / 255;
     for (let i = 0; i < n * 4; i++) rgba[i] = rgba8[i] * inv;
 
-    const { sharpness, gray8 } = sharpnessAndGray(rgba, cropW, cropH);
-    return { sharpness, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: cropW, height: cropH };
+    const { sharpness, center, gray8 } = sharpnessAndGray(rgba, cropW, cropH);
+    return { sharpness, center, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: cropW, height: cropH };
 }
 
 // Pixels RGBA 8 bits déjà en mémoire (ex. SER RGB rejoué) : pas d'aller-retour
@@ -128,8 +170,8 @@ function analyzeRgba8(rgba8, w, h) {
     const rgba = new Float32Array(n * 4);
     const inv  = 1 / 255;
     for (let i = 0; i < n * 4; i++) rgba[i] = rgba8[i] * inv;
-    const { sharpness, gray8 } = sharpnessAndGray(rgba, w, h);
-    return { sharpness, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: w, height: h };
+    const { sharpness, center, gray8 } = sharpnessAndGray(rgba, w, h);
+    return { sharpness, center, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: w, height: h };
 }
 
 // ── Message handler ─────────────────────────────────────────────────────────
@@ -190,11 +232,11 @@ self.onmessage = ({ data }) => {
             }
 
             const rgba = debayer(bayerData, srcW, srcH, cropX, cropY, cropW, cropH, bayerPattern, bitDepth);
-            const { sharpness, gray8 } = sharpnessAndGray(rgba, cropW, cropH);
+            const { sharpness, center: discCenter, gray8 } = sharpnessAndGray(rgba, cropW, cropH);
 
             const float32Buffer    = rgba.buffer;
             const packedGrayBuffer = gray8.buffer;
-            results.push({ sharpness, float32Buffer, packedGrayBuffer, width: cropW, height: cropH });
+            results.push({ sharpness, center: discCenter, float32Buffer, packedGrayBuffer, width: cropW, height: cropH });
             transferables.push(float32Buffer, packedGrayBuffer);
         }
 

@@ -1810,13 +1810,16 @@ async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth
                 stackQueue.writeBuffer(buffers.frameBuffers[bufferIdx], 0, float32Data);
             }
 
-            // Pack and upload AP data
+            // Pack and upload AP data. Global offset (whole-frame drift, also
+            // applied far from any AP): the shader adds it to the interpolated
+            // AP shifts, which are therefore sent relative to it
+            const gox = frame.globalOffset?.dx ?? 0, goy = frame.globalOffset?.dy ?? 0;
             const apData = new Float32Array(numAPs * 6);
             for (let a = 0; a < numAPs; a++) {
                 apData[a * 6] = alignmentPoints[a].x;
                 apData[a * 6 + 1] = alignmentPoints[a].y;
-                apData[a * 6 + 2] = shifts[a].dx;
-                apData[a * 6 + 3] = shifts[a].dy;
+                apData[a * 6 + 2] = shifts[a].dx - gox;
+                apData[a * 6 + 3] = shifts[a].dy - goy;
                 apData[a * 6 + 4] = shifts[a].quality;
                 apData[a * 6 + 5] = 0;
             }
@@ -1835,8 +1838,8 @@ async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth
             paramsF32[6] = drizzleScale;
             paramsF32[7] = frame.frameWeight;
             paramsF32[8] = frame.brightnessScale;
-            paramsF32[9] = 0;  // globalOffsetX
-            paramsF32[10] = 0; // globalOffsetY
+            paramsF32[9] = gox;   // globalOffsetX
+            paramsF32[10] = goy;  // globalOffsetY
             paramsF32[11] = minApQuality;
             paramsU32[12] = inputFormat;
             paramsF32[13] = pixfrac;

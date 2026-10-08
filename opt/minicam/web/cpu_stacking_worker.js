@@ -28,6 +28,9 @@ function downsampleN(gray, w, h, n) {
 // un gabarit de ciel noir, donc des décalages aléatoires.
 // 1) recherche grossière sur images sous-échantillonnées (×2 si searchRadius
 //    ≤ 48, ×4 au-delà), 2) affinage ±ds px en pleine résolution.
+// offset : décalage prédit { dx, dy } (image − référence, convention de
+// searchOffset côté GPU), la recherche est centrée dessus — une dérive plus
+// grande que searchRadius reste trouvée.
 // Retourne { dx, dy } en pixels PLEINE résolution (référence − image).
 // Perf indicative (640×480, gabarit 64×64 sous-échantillonné) :
 //   ×2, sr=16  →  33×33 × 4096 ≈ 4 M ops  → ~20 ms
@@ -73,7 +76,7 @@ function bestShift(ref, frm, w, h, tx0, ty0, ts, x0, x1, y0, y1) {
     return { dx: bestDx, dy: bestDy };
 }
 
-function estimateShift(refGray, frmGray, w, h, searchRadius) {
+function estimateShift(refGray, frmGray, w, h, searchRadius, offset = null) {
     const ds  = searchRadius > 48 ? 4 : 2;
     const ref = downsampleN(refGray, w, h, ds);
     const frm = downsampleN(frmGray, w, h, ds);
@@ -86,7 +89,8 @@ function estimateShift(refGray, frmGray, w, h, searchRadius) {
     const ty0 = clamp(Math.round(cy - ts / 2), 0, dh - ts);
     const sr  = Math.max(1, Math.ceil(searchRadius / ds));
 
-    const c = bestShift(ref.data, frm.data, dw, dh, tx0, ty0, ts, -sr, sr, -sr, sr);
+    const ox = Math.round((offset?.dx ?? 0) / ds), oy = Math.round((offset?.dy ?? 0) / ds);
+    const c = bestShift(ref.data, frm.data, dw, dh, tx0, ty0, ts, ox - sr, ox + sr, oy - sr, oy + sr);
 
     // Affinage pleine résolution autour de la solution grossière
     const fts = Math.min(ts * ds, 128);
@@ -132,7 +136,7 @@ self.onmessage = async ({ data }) => {
     // ── match-templates-batch — translation globale via SSD sous-échantillonné ──
     if (type === 'match-templates-batch') {
         const { requestId, refGrayData, frameGrayDatas = [],
-                width, height, alignmentPoints = [], searchRadius = 8 } = data;
+                width, height, alignmentPoints = [], searchRadius = 8, searchOffset = null } = data;
 
         const refGray = refGrayData instanceof Uint8Array ? refGrayData
                       : new Uint8Array(refGrayData instanceof ArrayBuffer ? refGrayData : refGrayData.buffer);
@@ -140,7 +144,7 @@ self.onmessage = async ({ data }) => {
         const allShifts = frameGrayDatas.map(fgd => {
             const frmGray = fgd instanceof Uint8Array ? fgd
                           : new Uint8Array(fgd instanceof ArrayBuffer ? fgd : fgd.buffer);
-            const { dx, dy } = estimateShift(refGray, frmGray, width, height, searchRadius);
+            const { dx, dy } = estimateShift(refGray, frmGray, width, height, searchRadius, searchOffset);
             return alignmentPoints.map(() => ({ dx, dy, quality: 1 }));
         });
 
