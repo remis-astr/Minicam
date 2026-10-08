@@ -323,7 +323,7 @@ self.addEventListener('message', async (e) => {
     // Step 2b: Stack RGBA frames (already demosaiced - for MONO/image inputs)
     // Uses pre-computed shifts from template matching
     if (type === 'stack-frame-batch-rgba') {
-        const { frames, shifts, frameWeights } = e.data;
+        const { frames, shifts, frameWeights, globalOffsets } = e.data;
         const ctx = stackingContext;
 
         if (!ctx) {
@@ -339,7 +339,8 @@ self.addEventListener('message', async (e) => {
                 return {
                     rgbaBuffer: frame.rgbaBuffer,
                     brightnessScale,
-                    frameWeight: frameWeights[i]
+                    frameWeight: frameWeights[i],
+                    globalOffset: globalOffsets?.[i] ?? null
                 };
             });
 

@@ -159,6 +159,26 @@ Spécifique à Minicam. Fichiers : `opt/minicam/src/minicam/imu.py`
   session, netteté +10 % par rapport à la fenêtre glissante à 10 % (104
   images), 23 s contre 15 s ; retrait vérifié exact (même stack qu'un
   empilement direct des images restées, écart ≤ 0,0001 %).
+- **Score de netteté du navigateur** (`cpu_analyze_worker.js`) : écart-type
+  du Laplacien sur l'image réduite 2×2 et lissée deux fois par [1 2 1],
+  limité au disque (> 30 % du max) et divisé par sa luminosité moyenne —
+  il mesure les détails de la planète, pas le bruit des pixels ni du
+  débayérisage, et ne dépend pas de la transparence. Comparé hors ligne à
+  12 scores (Sobel, Tenengrad, FFT, différence de gaussiennes…) sur 5 SER
+  de Jupiter (RGB et RAW Bayer) : le meilleur sur toutes ; l'ancien
+  Laplacien pleine résolution ne faisait pas mieux qu'une sélection au
+  hasard parmi les images gardées par le Pi. ~0,8 ms en 288×288.
+- **Recentrage avant alignement** : le barycentre du disque, calculé avec le
+  score, donne le décalage de chaque image par rapport à la référence ; les
+  points d'alignement sont cherchés autour de cette position (`searchOffset`)
+  et le décalage est appliqué à toute l'image (`globalOffsetX/Y` du shader
+  d'empilement, aussi loin des points). Une dérive du suivi plus grande que
+  le rayon de recherche est donc rattrapée ; le rayon (16 px par défaut) ne
+  couvre que la turbulence. Si le disque touche le bord (planète qui sort
+  du cadre, surface lunaire), son barycentre est ignoré et le dernier
+  décalage connu est gardé. Vérifié sur un SER avec 100 px de dérive
+  ajoutée : stack identique à celui du SER d'origine (GPU et CPU), alors
+  que l'ancien code l'étalait.
 - **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
   n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
 - **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel

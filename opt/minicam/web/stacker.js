@@ -406,7 +406,10 @@ export class StreamingStacker extends EventTarget {
         this._pool             = [];
         this._poolReplaced     = 0;
         this._alignMode        = options.alignMode ?? (mode === 'lucky' ? 'on' : 'on');
-        this._searchRadius     = options.searchRadius ?? 32;
+        // Rayon de recherche des points d'alignement autour de la position
+        // prédite par le recentrage (barycentre du disque) : il ne couvre plus
+        // la dérive du suivi, seulement la turbulence et l'erreur du barycentre.
+        this._searchRadius     = options.searchRadius ?? 16;
         this._targetFps        = options.fps ?? null;
         this._initialRoi       = options.roi ?? null;
         this._initialBitDepth  = options.bitDepth ?? null;
@@ -483,6 +486,11 @@ export class StreamingStacker extends EventTarget {
         this._cropW           = 0;
         this._cropH           = 0;
         this._refBrightness   = 0;
+        // Recentrage : barycentre du disque dans la référence, et dernier
+        // décalage connu (image − référence), réutilisé quand le disque touche
+        // le bord et que son barycentre n'est plus fiable
+        this._refCenter       = null;
+        this._lastOffset      = { dx: 0, dy: 0 };
 
         // Qualité adaptative (fenêtre glissante)
         this._sharpnessBuffer     = [];
@@ -564,6 +572,8 @@ export class StreamingStacker extends EventTarget {
         this._alignmentPoints = null;
         this._cropW           = 0;
         this._cropH           = 0;
+        this._refCenter       = null;
+        this._lastOffset      = { dx: 0, dy: 0 };
         this._sharpnessBuffer = [];
         this._lastSharpness   = 0;
         this._lastSnap        = null;
@@ -815,7 +825,7 @@ export class StreamingStacker extends EventTarget {
         if (!analyzed) return;
         lap('analyze');
 
-        const { sharpness, float32Buffer, packedGrayBuffer,
+        const { sharpness, center, float32Buffer, packedGrayBuffer,
                 width: _fw, height: _fh } = analyzed;
         const frameW = _fw ?? cropSize;
         const frameH = _fh ?? cropSize;
@@ -863,23 +873,28 @@ export class StreamingStacker extends EventTarget {
         if (!this._initialized) {
             this._cropW = frameW;
             this._cropH = frameH;
-            await this._initStacking(float32Buffer, frameW, frameH);
+            await this._initStacking(float32Buffer, frameW, frameH, center);
             const zeroShifts = this._alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
-            await this._stackFrame(float32Buffer, zeroShifts, sharpness);
-            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts: zeroShifts,
+            const zero = { dx: 0, dy: 0 };
+            await this._stackFrame(float32Buffer, zeroShifts, sharpness, 1.0, zero);
+            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts: zeroShifts, offset: zero,
                                          exposure_ms: exposure_ms ?? 0, gain: gain ?? 0 });
         } else {
-            // 4. Alignement (optionnel) puis accumulation
-            let shifts;
+            // 4. Alignement (optionnel) puis accumulation. Les points
+            // d'alignement sont cherchés autour de la position prédite par le
+            // barycentre du disque : une dérive du suivi plus grande que le
+            // rayon de recherche reste rattrapée.
+            let shifts, offset = { dx: 0, dy: 0 };
             if (this._alignMode !== 'none') {
-                shifts = await this._matchTemplates(packedGrayBuffer, this._cropW, this._cropH);
+                offset = this._recenterOffset(center);
+                shifts = await this._matchTemplates(packedGrayBuffer, this._cropW, this._cropH, offset);
             } else {
                 shifts = this._alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
             }
             lap('align');
-            await this._stackFrame(float32Buffer, shifts, sharpness);
+            await this._stackFrame(float32Buffer, shifts, sharpness, 1.0, offset);
             lap('stack');
-            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts,
+            if (elite) this._pool.push({ score: this._lastSharpness, store, shifts, offset,
                                          exposure_ms: exposure_ms ?? 0, gain: gain ?? 0 });
         }
 
@@ -915,7 +930,7 @@ export class StreamingStacker extends EventTarget {
             : await this._analyze(st.bitDepth === 8 ? new Uint8Array(st.data) : new Uint16Array(st.data),
                                   st.srcW, st.srcH, st.cropSize, st.bayerPattern, id, st.bitDepth);
         if (!analyzed?.float32Buffer) return;
-        await this._stackFrame(analyzed.float32Buffer, e.shifts, e.score, -1);
+        await this._stackFrame(analyzed.float32Buffer, e.shifts, e.score, -1, e.offset);
         this._stackedCount--;
         this._totalExpMs -= e.exposure_ms;
         this._gainSum    -= e.gain;
@@ -1103,9 +1118,12 @@ export class StreamingStacker extends EventTarget {
     }
 
     // Initialise le stacking à partir de la première frame acceptée
-    async _initStacking(float32Buffer, w, h) {
+    // center : barycentre de son disque (null s'il touche le bord : pas de recentrage)
+    async _initStacking(float32Buffer, w, h, center = null) {
         const refGray = float32ToGray(float32Buffer, w, h);
         this._refBrightness = meanBrightness(float32Buffer, w, h);
+        this._refCenter     = center;
+        this._lastOffset    = { dx: 0, dy: 0 };
 
         const searchRadius = this._searchRadius;
         const { alignmentPoints, patchSize } = createAPGrid(w, h, searchRadius);
@@ -1149,9 +1167,19 @@ export class StreamingStacker extends EventTarget {
         this._initialized = true;
     }
 
-    // Template matching : retourne les shifts pour la frame courante
+    // Décalage du disque (image − référence) d'après les barycentres ; le
+    // dernier connu quand le barycentre de l'image n'est pas fiable (la dérive
+    // est continue), nul sans barycentre de référence.
+    _recenterOffset(center) {
+        if (this._refCenter && center)
+            this._lastOffset = { dx: center.x - this._refCenter.x, dy: center.y - this._refCenter.y };
+        return this._lastOffset;
+    }
+
+    // Template matching : retourne les shifts pour la frame courante (décalage
+    // global compris), cherchés à ±searchRadius autour de ap + offset.
     // packedGrayBuffer est transféré → ne pas réutiliser après l'appel
-    _matchTemplates(packedGrayBuffer, w, h) {
+    _matchTemplates(packedGrayBuffer, w, h, offset = null) {
         return new Promise((resolve, reject) => {
             const requestId = ++this._reqId;
             const timeout   = setTimeout(
@@ -1183,12 +1211,14 @@ export class StreamingStacker extends EventTarget {
                 alignmentPoints: this._alignmentPoints,
                 patchSize:       this._patchSize,
                 searchRadius:    this._searchRadius,
+                searchOffset:    offset,
             }, [grayU8.buffer]);
         });
     }
 
-    // Accumulation dans le stack GPU — float32Buffer transféré
-    _stackFrame(float32Buffer, shifts, sharpness, weight = 1.0) {
+    // Accumulation dans le stack GPU — float32Buffer transféré. offset :
+    // décalage global de l'image, appliqué aussi loin des points d'alignement
+    _stackFrame(float32Buffer, shifts, sharpness, weight = 1.0, offset = null) {
         return new Promise((resolve, reject) => {
             const handler = ({ data }) => {
                 if (!data) return;
@@ -1208,6 +1238,7 @@ export class StreamingStacker extends EventTarget {
                 frames:       [{ rgbaBuffer: rgba, sharpness: Math.max(sharpness ?? 1, 0.001) }],
                 shifts:       [shifts],
                 frameWeights: [weight],   // −1 : retrait exact d'une image (pool élite)
+                globalOffsets: [offset ?? { dx: 0, dy: 0 }],
             }, [rgba.buffer]);   // transfert zéro copie
         });
     }
