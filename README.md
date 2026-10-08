@@ -179,6 +179,19 @@ Spécifique à Minicam. Fichiers : `opt/minicam/src/minicam/imu.py`
   décalage connu est gardé. Vérifié sur un SER avec 100 px de dérive
   ajoutée : stack identique à celui du SER d'origine (GPU et CPU), alors
   que l'ancien code l'étalait.
+- **Exposition et rendu des planètes** : sous les statistiques, niveau max
+  et part des pixels du disque écrêtés (≥ 98 %) sur les 50 dernières images
+  — en RAW c'est le capteur (alerte au-delà de 90 %, viser 60–75 % : ce
+  qui est écrêté est perdu), en JPEG/PNG la sortie de l'ISP. Point blanc
+  pris sur les pixels du disque et sur le canal le plus haut **après** la
+  balance des blancs : en RAW (vert dominant, gains R/B nettement > 1),
+  le point blanc calculé sur la luminance avant les gains laissait R et B
+  déborder et la zone équatoriale partait au blanc (SER SharpCap : 7 043
+  pixels écrêtés à l'affichage → 40). Curseur Gamma (> 1 assombrit les
+  tons moyens, 1,4–1,8 pour Jupiter en RAW ; l'ISP applique l'inverse).
+  Niveau de noir du capteur (`black_level` du Pi) retiré au rendu en RAW,
+  avant la balance des blancs ; le stack et le FITS restent bruts. Le Live
+  Stack garde l'ancien point blanc.
 - **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
   n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
 - **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel

@@ -71,12 +71,14 @@ function meanBrightness(float32Buf, w, h) {
 // percentiles ci-dessous : coût négligeable, appelée une fois par preview.
 // ---------------------------------------------------------------------------
 
-function computeAWBGains(float32Buf, w, h) {
+// black : niveau de noir du capteur (0–1), retiré avant les moyennes — sinon
+// le piédestal, identique sur les 3 canaux, tire les gains vers 1.
+function computeAWBGains(float32Buf, w, h, black = 0) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     let sumR = 0, sumG = 0, sumB = 0, count = 0;
     for (let i = 0; i < n; i += 16) {
-        const r = rgba[i*4], g = rgba[i*4+1], b = rgba[i*4+2];
+        const r = rgba[i*4] - black, g = rgba[i*4+1] - black, b = rgba[i*4+2] - black;
         // Ignore le fond quasi noir (bruit de lecture) pour ne pas biaiser
         // la moyenne — même seuil que meanBrightness().
         if ((r + g + b) / 3 > 10 / 255) { sumR += r; sumG += g; sumB += b; count++; }
@@ -273,9 +275,18 @@ function applySaturation(d, n, sat) {
 // Preview stretch : percentiles sur échantillon 1/16, LUT arcsinh, rendu canvas
 // ---------------------------------------------------------------------------
 
+// gamma : exposant appliqué après l'étirement (> 1 assombrit les tons moyens
+// et fait ressortir les détails d'une planète claire ; 1 = inchangé).
+// discWhite : point blanc = percentile `high` des pixels de l'objet (> 30 %
+// de son niveau max au-dessus du fond) et non de toute l'image — sinon, sur
+// une petite planète, le 99,9 % de l'image tombe dans le disque et ses zones
+// claires partent au blanc. black : niveau de noir du capteur (0–1), retiré
+// avant la balance des blancs (le piédestal multiplié par les gains R/B
+// teintait le fond).
 function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
                          contrast = 0, clahe = 0, saturation = 1, bgNeutral = false,
-                         removeGreen = false, localContrast = 0) {
+                         removeGreen = false, localContrast = 0,
+                         gamma = 1, discWhite = false, black = 0) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     // Fond neutre : médianes R, G, B ramenées à leur moyenne (retire la
@@ -299,20 +310,44 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     }
     const [gR, gG, gB] = awbGains ?? [1, 1, 1];
 
-    // Percentiles de luminance (échantillon 1/16 pour rapidité) — calculés
-    // sur la luminance AVANT balance des blancs : les gains R/B restent
-    // proches de 1 en pratique, donc la plage de stretch n'a pas besoin
-    // d'être recalculée après application des gains.
+    // Percentiles de luminance (échantillon 1/16 pour rapidité). Sans
+    // discWhite, sur la luminance AVANT balance des blancs (historique, Live
+    // Stack : gains proches de 1 sur des images déjà équilibrées).
     const all = new Float32Array(Math.ceil(n / 16));
+    // discWhite : point blanc sur le canal le plus haut APRÈS les gains de
+    // balance des blancs. Sur un RAW (vert dominant, gains R/B nettement > 1),
+    // un point blanc pris sur la luminance avant les gains laissait R et B
+    // dépasser : les zones claires de la planète partaient au blanc.
+    const peaks = discWhite ? new Float32Array(all.length) : null;
     let ns = 0;
     for (let i = 0; i < n; i += 16) {
         const lum = 0.299 * rgba[i*4] + 0.587 * rgba[i*4+1] + 0.114 * rgba[i*4+2];
-        if (lum > 0) all[ns++] = lum;
+        if (lum <= 0) continue;
+        if (peaks) {
+            const r = (rgba[i*4] - black) * gR, g = (rgba[i*4+1] - black) * gG, b = (rgba[i*4+2] - black) * gB;
+            all[ns] = 0.299 * r + 0.587 * g + 0.114 * b;
+            peaks[ns] = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        } else {
+            all[ns] = lum - black;
+        }
+        ns++;
     }
     if (!ns) return;
     const samples = all.subarray(0, ns).sort();
     const lo  = samples[Math.max(0, Math.floor(low  * samples.length))];
-    const hi  = samples[Math.min(samples.length - 1, Math.floor(high * samples.length))];
+    let   hi  = samples[Math.min(samples.length - 1, Math.floor(high * samples.length))];
+    if (peaks) {
+        // pixels de l'objet = queue de l'échantillon trié, au-dessus de 30 %
+        // de (max robuste − fond) ; recherche dichotomique du début de la queue
+        const pk  = peaks.subarray(0, ns).sort();
+        const top = pk[Math.max(0, ns - 1 - Math.floor(ns * 1e-4))];
+        const thr = lo + 0.3 * (top - lo);
+        let a = 0, b = ns;
+        while (a < b) { const m = (a + b) >> 1; if (pk[m] > thr) b = m; else a = m + 1; }
+        const tail = ns - a;
+        hi = tail >= 50 ? pk[a + Math.min(tail - 1, Math.floor(high * tail))]
+                        : pk[Math.min(ns - 1, Math.floor(high * ns))];
+    }
     const rng = Math.max(hi - lo, 1e-7);
 
     // LUT 4096 entrées : [lo, hi] → [0, 255] via arcsinh(β·x)/arcsinh(β)
@@ -328,6 +363,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     for (let i = 0; i < LUT; i++) {
         const norm = i / (LUT - 1);                                    // [0, 1]
         let s      = beta > 0 ? Math.asinh(beta * norm) / abeta : norm;
+        if (gamma !== 1) s = Math.pow(s, gamma);
         if (kS > 0) s = (sig(s) - s0) / (s1 - s0);
         lut[i]     = Math.min(255, Math.round(s * 255));
     }
@@ -341,7 +377,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     const d     = idata.data;
     for (let i = 0; i < n; i++) {
         for (let ch = 0; ch < 3; ch++) {
-            const v      = rgba[i*4+ch] * gains[ch];
+            const v      = (rgba[i*4+ch] - black) * gains[ch];
             const idx    = Math.max(0, Math.min(LUT - 1, Math.round((v - lo) * scale)));
             d[i*4 + ch]  = lut[idx];
         }
@@ -448,6 +484,16 @@ export class StreamingStacker extends EventTarget {
         this._stretchMode      = options.stretchMode ?? 'manual';
         this._stretchTarget    = options.stretchTarget ?? null;   // fond visé 0–1, null = automatique
         this._localContrast    = options.localContrast ?? 0;      // amplitude, 0 = désactivé (les deux modes)
+        // Étirement manuel : gamma après étirement, point blanc pris sur le
+        // disque de l'objet (voir stretchToCanvas)
+        this._gamma            = options.gamma ?? 1;
+        this._discWhite        = options.discWhite ?? false;
+        // Niveau de noir du capteur (0–1) des images RAW reçues (métadonnée
+        // black_level du Pi, échelle 16 bits) : retiré au rendu, pas dans le
+        // stack (le FITS reste brut)
+        this._blackLevel       = 0;
+        // Niveau max et part de pixels saturés des 50 dernières images analysées
+        this._exposureHist     = [];
         this._removeGreen      = options.removeGreen ?? false;    // les deux modes
         this._autoState        = {};
         this.lastAutoStretch   = null;   // derniers paramètres auto (affichage)
@@ -576,6 +622,7 @@ export class StreamingStacker extends EventTarget {
         this._lastOffset      = { dx: 0, dy: 0 };
         this._sharpnessBuffer = [];
         this._lastSharpness   = 0;
+        this._exposureHist    = [];
         this._lastSnap        = null;
         this._autoState       = {};
         this.lastAutoStretch  = null;
@@ -622,6 +669,24 @@ export class StreamingStacker extends EventTarget {
     /** Contraste local grande échelle : amplitude (0,8 = réglage par défaut de la page), 0 = désactivé. */
     setLocalContrast(amount) { this._localContrast = amount; this._scheduleRender(); }
     setRemoveGreen(on) { this._removeGreen = on; this._scheduleRender(); }
+    /** Gamma après étirement (> 1 assombrit les tons moyens), étirement manuel. */
+    setGamma(g) { this._gamma = g; this._scheduleRender(); }
+    /** Point blanc calculé sur le disque de l'objet plutôt que sur toute l'image. */
+    setDiscWhite(on) { this._discWhite = on; this._scheduleRender(); }
+
+    /**
+     * Saturation des 50 dernières images analysées (acceptées ou non) :
+     * { peak, clipped, format } — peak = niveau max (0–1, canal le plus haut),
+     * clipped = plus grande part de pixels du disque à ≥ 98 % ; null avant la
+     * première image. En RAW c'est le capteur ; en JPEG/PNG, la sortie de l'ISP.
+     */
+    get exposureStats() {
+        const hst = this._exposureHist;
+        if (!hst.length) return null;
+        let peak = 0, clipped = 0;
+        for (const e of hst) { if (e.peak > peak) peak = e.peak; if (e.clipped > clipped) clipped = e.clipped; }
+        return { peak, clipped, format: this._exposureFormat };
+    }
 
     /** Active/désactive ondelettes + CLAHE (à la fin du stack). */
     setPostProcessing(active) { this._postActive = active; this._scheduleRender(); }
@@ -827,6 +892,12 @@ export class StreamingStacker extends EventTarget {
 
         const { sharpness, center, float32Buffer, packedGrayBuffer,
                 width: _fw, height: _fh } = analyzed;
+        if (analyzed.peak !== undefined) {
+            this._exposureHist.push({ peak: analyzed.peak, clipped: analyzed.clipped ?? 0 });
+            if (this._exposureHist.length > 50) this._exposureHist.shift();
+            this._exposureFormat = format;
+        }
+        this._blackLevel = format === 'raw' ? (meta.black_level ?? 0) / 65535 : 0;
         const frameW = _fw ?? cropSize;
         const frameH = _fh ?? cropSize;
 
@@ -1277,7 +1348,7 @@ export class StreamingStacker extends EventTarget {
         const snap = this._lastSnap;
         if (!snap || !this._canvas) return;
         const { width: w, height: h } = snap;
-        const awbGains = this._awbEnabled ? computeAWBGains(snap.data, w, h) : null;
+        const awbGains = this._awbEnabled ? computeAWBGains(snap.data, w, h, this._blackLevel) : null;
         const post = this._postActive;
         const sharpened = post ? applyWavelets(snap.data, w, h, this._wavelets, this._waveletDenoise)
                                : snap.data;
@@ -1290,7 +1361,8 @@ export class StreamingStacker extends EventTarget {
         } else {
             stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
                             this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
-                            this._saturation, this._bgNeutral, this._removeGreen, this._localContrast);
+                            this._saturation, this._bgNeutral, this._removeGreen, this._localContrast,
+                            this._gamma, this._discWhite, this._blackLevel);
         }
         this.dispatchEvent(new CustomEvent('preview'));
     }
