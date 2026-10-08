@@ -177,9 +177,14 @@
       <span class="range-val" id="stretch-beta-val">0</span>
     </div>
     <div class="range-row">
-      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
+      <label for="stretch-hi" title="Percentile des pixels de la planète (et non de toute l'image) qui devient le blanc : 100 % = rien n'est écrêté à l'affichage.">Point blanc <span class="input-hint">(percentile du disque)</span></label>
       <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
       <span class="range-val" id="stretch-hi-val">99.9 %</span>
+    </div>
+    <div class="range-row">
+      <label for="stretch-gamma" title="Appliqué après l'étirement. Au-dessus de 1, les tons moyens s'assombrissent : les bandes et les détails d'une planète claire ressortent (l'ISP du Pi fait l'inverse, gamma ≈ 0,45). 1 = linéaire.">Gamma <span class="input-hint">(&gt; 1 : planète moins claire)</span></label>
+      <input type="range" id="stretch-gamma" min="0.5" max="3" step="0.05" value="1">
+      <span class="range-val" id="stretch-gamma-val">1.00</span>
     </div>
 
     <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter), ou en direct si coché ; aperçu et PNG, le FITS reste brut</div>
@@ -254,6 +259,7 @@
     </div>
 
     <div id="stats" class="stats">—</div>
+    <div id="expo-stats" class="stats" style="margin-top:4px;" title="Sur les 50 dernières images analysées. En RAW : niveau du capteur — au-delà de ~90 % les zones claires risquent l'écrêtement, qui est définitif ; viser 60–75 %. En JPEG/PNG : sortie de l'ISP (courbe gamma), pas le capteur."></div>
   </section>
 </main>
 
@@ -284,6 +290,9 @@ const elStretchBeta  = document.getElementById('stretch-beta');
 const elStretchBetaVal = document.getElementById('stretch-beta-val');
 const elStretchHi    = document.getElementById('stretch-hi');
 const elStretchHiVal = document.getElementById('stretch-hi-val');
+const elGamma        = document.getElementById('stretch-gamma');
+const elGammaVal     = document.getElementById('stretch-gamma-val');
+const elExpoStats    = document.getElementById('expo-stats');
 const btnStart     = document.getElementById('btn-start');
 const elWav        = [1, 2, 3, 4].map((j) => document.getElementById(`wav-${j}`));
 const elWavDenoise = document.getElementById('wav-denoise');
@@ -472,6 +481,10 @@ elStretchBeta.addEventListener('input', () => {
     elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
     view()?.setStretchBeta(v);
 });
+elGamma.addEventListener('input', () => {
+    elGammaVal.textContent = parseFloat(elGamma.value).toFixed(2);
+    view()?.setGamma(parseFloat(elGamma.value));
+});
 elStretchHi.addEventListener('input', () => {
     elStretchHiVal.textContent = parseFloat(elStretchHi.value).toFixed(1) + ' %';
     const { lo, hi, beta } = stretchValues();
@@ -538,7 +551,25 @@ elRoi.addEventListener('change', () => {
 for (const el of [elRoi, elBitDepth, elFormat]) el.addEventListener('change', updateSelectionUi);
 updateSelectionUi();
 
+// Niveau de la planète et saturation (50 dernières images analysées)
+function updateExposure() {
+    const e = view()?.exposureStats;
+    if (!e) { elExpoStats.textContent = ''; return; }
+    const src = e.format === 'raw' ? 'capteur' : 'ISP';
+    const pct = (e.peak * 100).toFixed(0);
+    const clip = (e.clipped * 100).toFixed(e.clipped < 0.01 ? 2 : 1);
+    let advice = '';
+    if (e.format === 'raw') {
+        if (e.clipped > 0.001 || e.peak >= 0.98) advice = '  ⚠ saturation : baisser la pose ou le gain';
+        else if (e.peak > 0.9) advice = '  ⚠ proche de la saturation';
+        else if (e.peak < 0.4) advice = '  (sous-exposé : la pose ou le gain peuvent monter)';
+    }
+    elExpoStats.textContent = `Niveau max (${src}) : ${pct} %  |  pixels écrêtés : ${clip} %${advice}`;
+    elExpoStats.style.color = advice.startsWith('  ⚠') ? '#e8a33a' : '';
+}
+
 function updateStats() {
+    updateExposure();
     const el = view()?.eliteStats;
     if (el) {
         const v = view();
@@ -605,6 +636,8 @@ btnStart.addEventListener('click', async () => {
             stretchLow:       parseFloat(elStretchLo.value) / 100,
             stretchHigh:      parseFloat(elStretchHi.value) / 100,
             stretchBeta:      parseFloat(elStretchBeta.value),
+            gamma:            parseFloat(elGamma.value),
+            discWhite:        true,
             ...postValues(),
             postLive:         elPostLive.checked,
             // Pas de cadence fixe : le Pi envoie au maximum, régulé par un
