@@ -155,8 +155,16 @@
       </select>
     </div>
 
+    <div class="control-row control-row--inline">
+      <label for="target-mode" title="Planète : le disque entier est dans le champ, chaque image est recentrée sur son barycentre. Surface : Lune ou Soleil en gros plan, disque partiel — la zone éclairée touche les bords, le décalage est mesuré par corrélation de phase avec l'image de référence. Choix gardé par le navigateur.">Cible</label>
+      <select id="target-mode">
+        <option value="disc" selected>Planète (disque entier)</option>
+        <option value="surface">Surface (Lune, Soleil, disque partiel)</option>
+      </select>
+    </div>
+
     <div class="range-row" id="align-radius-row">
-      <label for="align-radius" title="Chaque image est d'abord recentrée sur le barycentre de la planète (la dérive du suivi est rattrapée quelle que soit son amplitude) ; ce rayon ne couvre que l'écart restant : turbulence et imprécision du barycentre. L'augmenter ralentit l'alignement.">Rayon recherche</label>
+      <label for="align-radius" title="Chaque image est d'abord recentrée (barycentre de la planète, ou corrélation de phase en mode Surface : la dérive du suivi est rattrapée quelle que soit son amplitude) ; ce rayon ne couvre que l'écart restant : turbulence et imprécision du barycentre. L'augmenter ralentit l'alignement.">Rayon recherche</label>
       <input type="range" id="align-radius" min="8" max="256" step="8" value="16">
       <span class="range-val" id="align-radius-val">16 px</span>
     </div>
@@ -283,6 +291,12 @@ const elBitDepthRow = document.getElementById('bitdepth-row');
 const elQuality    = document.getElementById('quality-slider');
 const elQualityVal = document.getElementById('quality-val');
 const elAlignMode  = document.getElementById('align-mode');
+const elTarget     = document.getElementById('target-mode');
+try { const t = localStorage.getItem('lucky.target'); if (t === 'disc' || t === 'surface') elTarget.value = t; } catch {}
+elTarget.addEventListener('change', () => {
+    try { localStorage.setItem('lucky.target', elTarget.value); } catch {}
+    stacker?.setTarget(elTarget.value);
+});
 const elAwb        = document.getElementById('awb-toggle');
 const elStretchLo    = document.getElementById('stretch-lo');
 const elStretchLoVal = document.getElementById('stretch-lo-val');
@@ -626,6 +640,7 @@ btnStart.addEventListener('click', async () => {
             selection:        elSelection.value,
             poolSize:         poolCapacity(parseInt(elPoolSize.value)),
             alignMode:        elAlignMode.value,
+            target:           elTarget.value,
             searchRadius:     parseInt(elAlignRadius.value),
             bitDepth:         parseInt(elBitDepth.value),
             roi:              parseRoi(elRoi.value),
