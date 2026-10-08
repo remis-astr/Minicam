@@ -179,6 +179,17 @@ Spécifique à Minicam. Fichiers : `opt/minicam/src/minicam/imu.py`
   décalage connu est gardé. Vérifié sur un SER avec 100 px de dérive
   ajoutée : stack identique à celui du SER d'origine (GPU et CPU), alors
   que l'ancien code l'étalait.
+- **Cible Surface** (menu « Cible », choix gardé par le navigateur) : Lune
+  ou Soleil en gros plan, disque partiel — la zone éclairée touche les
+  bords, pas de barycentre. Le décalage vient de la corrélation de phase
+  entre l'image réduite (côté ≤ 128 px, fenêtre de Hann, FFT 2D) et la
+  référence, calculée dans le worker d'analyse pour les seules images
+  acceptées (~8 ms en 640×480) ; pic trop bas → dernier décalage connu.
+  Précision < 1 px jusqu'à 150 × 100 px de décalage. Vérifié sur une
+  vidéo de la Lune (fenêtres 640×480 d'un MP4 4032×3024) : corrélation
+  des détails du stack avec l'image source 0,82 avec ou sans 75 px de
+  dérive ajoutée, contre 0,58 / 0,47 pour l'ancien code (rayon 32) et
+  0,40 en cible Planète ; au limbe 0,96 contre 0,85 en cible Planète.
 - **Exposition et rendu des planètes** : sous les statistiques, niveau max
   et part des pixels du disque écrêtés (≥ 98 %) sur les 50 dernières images
   — en RAW c'est le capteur (alerte au-delà de 90 %, viser 60–75 % : ce

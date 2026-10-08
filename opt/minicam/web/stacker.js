@@ -537,6 +537,11 @@ export class StreamingStacker extends EventTarget {
         // le bord et que son barycentre n'est plus fiable
         this._refCenter       = null;
         this._lastOffset      = { dx: 0, dy: 0 };
+        // Cible : 'disc' = planète entière dans le champ (recentrage sur le
+        // barycentre du disque) ; 'surface' = Lune/Soleil en gros plan ou
+        // disque partiel (zone éclairée au bord : décalage par corrélation de
+        // phase avec la référence, calculé dans le worker d'analyse)
+        this._target          = options.target === 'surface' ? 'surface' : 'disc';
 
         // Qualité adaptative (fenêtre glissante)
         this._sharpnessBuffer     = [];
@@ -631,6 +636,7 @@ export class StreamingStacker extends EventTarget {
         this._poolReplaced    = 0;
         this._postActive      = this._postLive;
         if (this._stackWorker) this._stackWorker.postMessage({ type: 'cleanup' });
+        this._analyzeWorker?.postMessage({ type: 'set-shift-reference', gray: null });
         if (this._canvas) {
             const ctx = this._canvas.getContext('2d');
             ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
@@ -725,6 +731,12 @@ export class StreamingStacker extends EventTarget {
         if (this._alignMode === mode) return;
         this._alignMode = mode;
         if (this._initialized) this.reset();
+    }
+
+    /** 'disc' (planète entière) | 'surface' (Lune, Soleil, disque partiel) — sans reset. */
+    setTarget(t) {
+        this._target = t === 'surface' ? 'surface' : 'disc';
+        this._lastOffset = { dx: 0, dy: 0 };
     }
 
     setSearchRadius(r) {
@@ -957,7 +969,9 @@ export class StreamingStacker extends EventTarget {
             // rayon de recherche reste rattrapée.
             let shifts, offset = { dx: 0, dy: 0 };
             if (this._alignMode !== 'none') {
-                offset = this._recenterOffset(center);
+                offset = this._target === 'surface'
+                    ? this._surfaceOffset(await this._phaseShift(packedGrayBuffer, this._cropW, this._cropH))
+                    : this._recenterOffset(center);
                 shifts = await this._matchTemplates(packedGrayBuffer, this._cropW, this._cropH, offset);
             } else {
                 shifts = this._alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
@@ -1195,6 +1209,9 @@ export class StreamingStacker extends EventTarget {
         this._refBrightness = meanBrightness(float32Buffer, w, h);
         this._refCenter     = center;
         this._lastOffset    = { dx: 0, dy: 0 };
+        // Référence de la corrélation de phase (cible surface), copiée : refGray
+        // sert aussi à l'alignement
+        this._analyzeWorker.postMessage({ type: 'set-shift-reference', gray: refGray.slice(), width: w, height: h });
 
         const searchRadius = this._searchRadius;
         const { alignmentPoints, patchSize } = createAPGrid(w, h, searchRadius);
@@ -1244,6 +1261,29 @@ export class StreamingStacker extends EventTarget {
     _recenterOffset(center) {
         if (this._refCenter && center)
             this._lastOffset = { dx: center.x - this._refCenter.x, dy: center.y - this._refCenter.y };
+        return this._lastOffset;
+    }
+
+    // Corrélation de phase avec la référence (worker d'analyse), image
+    // acceptée seulement — copie du gris : il part ensuite à l'alignement
+    _phaseShift(grayBuffer, w, h) {
+        return new Promise((resolve) => {
+            const requestId = ++this._reqId;
+            const handler = ({ data }) => {
+                if (data?.type !== 'phase-shift-result' || data.requestId !== requestId) return;
+                this._analyzeWorker.removeEventListener('message', handler);
+                resolve(data.shift);
+            };
+            this._analyzeWorker.addEventListener('message', handler);
+            this._analyzeWorker.postMessage({ type: 'phase-shift', gray: new Uint8Array(grayBuffer).slice(),
+                                              width: w, height: h, requestId });
+        });
+    }
+
+    // Cible surface : décalage donné par la corrélation de phase ; pic trop
+    // bas (image floue, nuage, autre zone) → dernier décalage connu
+    _surfaceOffset(shift) {
+        if (shift && shift.peak >= 0.03) this._lastOffset = { dx: shift.dx, dy: shift.dy };
         return this._lastOffset;
     }
 

@@ -183,6 +183,129 @@ function analyzeRgba8(rgba8, w, h) {
     return { sharpness, center, peak, clipped, float32Buffer: rgba.buffer, packedGrayBuffer: gray8.buffer, width: w, height: h };
 }
 
+// ── Décalage global par corrélation de phase (cible « surface ») ───────────
+// Sur la Lune ou le Soleil en gros plan, la zone éclairée touche les bords :
+// pas de barycentre fiable pour recentrer. Le décalage image − référence est
+// alors le pic de la corrélation de phase entre les deux images réduites
+// (côté ≤ 128 px, fenêtre de Hann, FFT 2D) : insensible aux variations de
+// luminosité, trouve en une passe une dérive jusqu'à ~1/4 du champ.
+// Précision ~1–2 px pleine résolution (affinée par les points d'alignement).
+// Demandée par le stacker pour les seules images acceptées (~8 ms en 640×480).
+let shiftRef = null;   // { w, h, f, bw, bh, nx, ny, re, im } : spectre de la référence
+const _fftTables = new Map();
+
+function _fftTable(n) {
+    let t = _fftTables.get(n);
+    if (t) return t;
+    const bits = Math.log2(n), rev = new Uint32Array(n);
+    for (let i = 0; i < n; i++) {
+        let r = 0;
+        for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
+        rev[i] = r;
+    }
+    const cos = new Float64Array(n / 2), sin = new Float64Array(n / 2);
+    for (let i = 0; i < n / 2; i++) { cos[i] = Math.cos(2 * Math.PI * i / n); sin[i] = Math.sin(2 * Math.PI * i / n); }
+    t = { rev, cos, sin };
+    _fftTables.set(n, t);
+    return t;
+}
+
+// FFT radix 2 en place de n valeurs complexes (pas `stride` à partir de off) ;
+// inv : transformée inverse non normalisée
+function _fft1(re, im, off, stride, n, inv) {
+    const { rev, cos, sin } = _fftTable(n);
+    for (let i = 0; i < n; i++) {
+        const j = rev[i];
+        if (j > i) {
+            const a = off + i * stride, b = off + j * stride;
+            let t = re[a]; re[a] = re[b]; re[b] = t;
+            t = im[a]; im[a] = im[b]; im[b] = t;
+        }
+    }
+    const sg = inv ? 1 : -1;
+    for (let size = 2; size <= n; size <<= 1) {
+        const half = size >> 1, step = n / size;
+        for (let s = 0; s < n; s += size) {
+            for (let k = 0; k < half; k++) {
+                const c = cos[k * step], sn = sg * sin[k * step];
+                const a = off + (s + k) * stride, b = a + half * stride;
+                const tr = re[b] * c - im[b] * sn, ti = re[b] * sn + im[b] * c;
+                re[b] = re[a] - tr; im[b] = im[a] - ti;
+                re[a] += tr; im[a] += ti;
+            }
+        }
+    }
+}
+
+function _fft2(re, im, nx, ny, inv) {
+    for (let y = 0; y < ny; y++) _fft1(re, im, y * nx, 1, nx, inv);
+    for (let x = 0; x < nx; x++) _fft1(re, im, x, nx, ny, inv);
+}
+
+// Image 8 bits → réduite par blocs f×f, moyenne retirée, fenêtre de Hann,
+// placée dans un tableau nx×ny complété de zéros, puis FFT
+function _spectrum(gray, w, h, f, bw, bh, nx, ny) {
+    const re = new Float64Array(nx * ny), im = new Float64Array(nx * ny);
+    let sum = 0;
+    for (let y = 0; y < bh; y++) {
+        for (let x = 0; x < bw; x++) {
+            let v = 0;
+            for (let j = 0; j < f; j++) {
+                const row = (y * f + j) * w + x * f;
+                for (let i = 0; i < f; i++) v += gray[row + i];
+            }
+            re[y * nx + x] = v;
+            sum += v;
+        }
+    }
+    const mean = sum / (bw * bh);
+    for (let y = 0; y < bh; y++) {
+        const wy = 0.5 - 0.5 * Math.cos(2 * Math.PI * (y + 0.5) / bh);
+        for (let x = 0; x < bw; x++) {
+            const wx = 0.5 - 0.5 * Math.cos(2 * Math.PI * (x + 0.5) / bw);
+            re[y * nx + x] = (re[y * nx + x] - mean) * wx * wy;
+        }
+    }
+    _fft2(re, im, nx, ny, false);
+    return { re, im };
+}
+
+function setShiftReference(gray, w, h) {
+    if (!gray) { shiftRef = null; return; }
+    const f  = Math.max(1, Math.ceil(Math.max(w, h) / 128));
+    const bw = Math.floor(w / f), bh = Math.floor(h / f);
+    if (bw < 16 || bh < 16) { shiftRef = null; return; }
+    const nx = 1 << Math.ceil(Math.log2(bw)), ny = 1 << Math.ceil(Math.log2(bh));
+    const { re, im } = _spectrum(gray, w, h, f, bw, bh, nx, ny);
+    shiftRef = { w, h, f, bw, bh, nx, ny, re, im };
+}
+
+// → { dx, dy, peak } (image − référence, pixels pleine résolution), null sans
+// référence de même taille. peak : hauteur du pic (0–1), confiance.
+function phaseShift(gray, w, h) {
+    const R = shiftRef;
+    if (!R || R.w !== w || R.h !== h) return null;
+    const { f, bw, bh, nx, ny } = R;
+    const { re, im } = _spectrum(gray, w, h, f, bw, bh, nx, ny);
+    // spectre croisé normalisé F·G*/|F·G*|
+    for (let i = 0; i < re.length; i++) {
+        const a = re[i], b = im[i], c = R.re[i], d = R.im[i];
+        const xr = a * c + b * d, xi = b * c - a * d;
+        const m = Math.sqrt(xr * xr + xi * xi) + 1e-12;
+        re[i] = xr / m; im[i] = xi / m;
+    }
+    _fft2(re, im, nx, ny, true);
+    let best = -Infinity, bi = 0;
+    for (let i = 0; i < re.length; i++) if (re[i] > best) { best = re[i]; bi = i; }
+    const px = bi % nx, py = (bi / nx) | 0;
+    const at = (x, y) => re[((y + ny) % ny) * nx + ((x + nx) % nx)];
+    const sub = (m, c, p) => { const den = m - 2 * c + p; return den < 0 ? 0.5 * (m - p) / den : 0; };
+    const sx = sub(at(px - 1, py), best, at(px + 1, py));
+    const sy = sub(at(px, py - 1), best, at(px, py + 1));
+    const ux = px > nx / 2 ? px - nx : px, uy = py > ny / 2 ? py - ny : py;
+    return { dx: (ux + sx) * f, dy: (uy + sy) * f, peak: best / (nx * ny) };
+}
+
 // ── Message handler ─────────────────────────────────────────────────────────
 self.onmessage = ({ data }) => {
     if (!data) return;
@@ -190,6 +313,18 @@ self.onmessage = ({ data }) => {
     if (data.type === 'init') {
         initialized = true;
         self.postMessage({ type: 'ready' });
+        return;
+    }
+
+    // Référence de la corrélation de phase (cible surface) : image de
+    // référence du stack en niveaux de gris 8 bits ; gray null = oubliée
+    if (data.type === 'set-shift-reference') {
+        setShiftReference(data.gray ?? null, data.width, data.height);
+        return;
+    }
+    if (data.type === 'phase-shift') {
+        const { gray, width, height, requestId } = data;
+        self.postMessage({ type: 'phase-shift-result', requestId, shift: phaseShift(gray, width, height) });
         return;
     }
 
