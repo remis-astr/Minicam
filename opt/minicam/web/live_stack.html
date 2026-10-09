@@ -2,202 +2,228 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Live Stack — MiniCam</title>
-<link rel="stylesheet" href="/static/style.css">
-<style>
-.stack-section {
-  width: 100%; max-width: 800px;
-  display: flex; flex-direction: column; gap: 1rem;
-  border: 1px solid #2a4a6a; border-radius: 6px; padding: 1rem;
-  background: #161820;
-}
-.stats {
-  font-size: 0.85rem; color: #8bb; font-family: monospace;
-  min-height: 2.4em; line-height: 1.7; white-space: pre;
-}
-.gpu-warn {
-  background: #3a2a10; border: 1px solid #6a4a20; border-radius: 4px;
-  padding: 0.75rem; font-size: 0.8rem; color: #da8; line-height: 1.4;
-}
-.range-row {
-  display: flex; align-items: center; gap: 0.75rem;
-}
-.range-row label { flex: 1; font-size: 0.85rem; color: #aaa; }
-.range-row input[type=range] { flex: 2; accent-color: #48a; }
-.range-val { width: 3.5rem; text-align: right; font-size: 0.85rem; color: #ddd; flex-shrink: 0; }
-.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
-.back-link:hover { color: #adf; }
-.btn-green  { background: #2a5a2a; }
-.btn-green:hover:not(:disabled) { background: #3a7a3a; }
-/* La preview-box s'adapte au canvas (pas de 16/9 forcé) */
-#preview-box { aspect-ratio: unset; height: auto; min-height: 200px; }
-#stack-canvas { display: block; width: 100%; height: auto; }
-#preview-box:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
-#preview-box:fullscreen #stack-canvas { width: auto; max-width: 100vw; max-height: 100vh; }
-</style>
+<script>
+try { if (localStorage.getItem('minicam.theme') === 'night') document.documentElement.dataset.theme = 'night'; } catch {}
+</script>
+<link rel="stylesheet" href="/static/ui.css">
 </head>
-<body>
-<header>
-  <a href="/" class="back-link">← MiniCam</a>
-  <h1>Live Stack</h1>
+<body class="app" data-tab="render">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="night-red" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.30 0.59 0.11 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+<header class="topbar">
+  <a class="brand" href="/">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h3M17 12h3M12 4v3M12 17v3"/></svg>
+    MiniCam
+  </a>
+  <nav class="pages" aria-label="Pages">
+    <a href="/">Caméra</a>
+    <a href="/static/lucky_stack.html">Lucky Stack</a>
+    <a href="/static/live_stack.html" aria-current="page">Live Stack</a>
+    <a href="/static/guidage.html">Guidage</a>
+    <a href="/static/photos_gallery.html">Galerie</a>
+  </nav>
   <span id="ws-status" class="badge disconnected">Déconnecté</span>
+  <div class="spacer"></div>
+  <button id="btn-theme" class="btn-ghost" aria-pressed="false" title="Mode nuit : tout en rouge sombre, pour garder la vision nocturne">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+    <span>Nuit</span>
+  </button>
+  <div class="actions">
+    <button id="btn-start" class="btn-primary">
+      <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4l13 8-13 8z"/></svg>Démarrer
+    </button>
+    <button id="btn-stop" class="btn-danger hidden">
+      <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>Arrêter
+    </button>
+    <button id="btn-reset" disabled title="Effacer le dernier stack affiché">Reset</button>
+    <button id="btn-save-png" disabled title="Image affichée (étirement compris)">PNG</button>
+    <button id="btn-save-fits" disabled title="Stack brut, 32 bits flottants">FITS</button>
+  </div>
 </header>
 
-<main>
-  <div id="gpu-warn" class="gpu-warn hidden">
-    WebGPU indisponible — calculs sur le processeur (plus lent).<br>
-    <span id="gpu-reason"></span>
-  </div>
+<div class="workspace">
 
-  <section class="preview-box" id="preview-box">
-    <canvas id="stack-canvas"></canvas>
-    <span id="preview-placeholder" style="position:absolute;color:#555;font-size:0.85rem;">En attente de frames…</span>
-    <button id="btn-fullscreen" class="overlay-btn" title="Plein écran">⛶</button>
+  <!-- ── Acquisition ─────────────────────────────────────────────────── -->
+  <aside class="panel panel-left" aria-label="Acquisition">
+    <details class="section" open>
+      <summary>Caméra</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="gain-input">Gain <span class="hint">1 – 64</span></label>
+          <input type="number" id="gain-input" min="1" max="64" step="0.5" value="8">
+        </div>
+        <div class="field">
+          <label for="expo-input">Exposition <span class="hint">ms</span></label>
+          <input type="number" id="expo-input" min="0.1" max="10000" step="0.1" value="1000">
+        </div>
+        <div class="field check">
+          <label for="sync-camera">Appliquer à la caméra</label>
+          <input type="checkbox" id="sync-camera" checked>
+        </div>
+        <div class="field">
+          <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+          <select id="mode-select"><option value="">—</option></select>
+        </div>
+        <div class="field">
+          <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">ROI</label>
+          <select id="roi-select"><option value="full" selected>Plein champ</option></select>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Empilement</summary>
+      <div class="section-body">
+        <div class="field check">
+          <label for="align-toggle">Alignement sur les étoiles</label>
+          <input type="checkbox" id="align-toggle" checked>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Source</summary>
+      <div class="section-body">
+        <div class="field wide">
+          <label for="dng-files" title="Rejoue une série de fichiers locaux (DNG rpicam-still, FITS brut Bayer, mono ou RGB) à la place de la caméra (lus dans le navigateur, rien n'est envoyé au Pi)">Fichiers DNG / FITS <span class="hint">à la place de la caméra</span></label>
+          <div style="display:flex;gap:6px;align-items:center;min-width:0;">
+            <input type="file" id="dng-files" accept=".dng,.fit,.fits,.fts" multiple>
+            <button id="dng-clear" class="hidden" title="Revenir à la caméra" aria-label="Revenir à la caméra">✕</button>
+          </div>
+        </div>
+        <p class="note">Les fichiers sont lus dans le navigateur : rien n'est envoyé au Pi.</p>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ── Image ───────────────────────────────────────────────────────── -->
+  <section class="view" aria-label="Aperçu du stack">
+    <div class="viewport" id="preview-box">
+      <canvas id="stack-canvas"></canvas>
+      <span id="preview-placeholder" class="placeholder">En attente d'images…</span>
+      <div class="view-banner">
+        <div id="gpu-warn" class="warn-box hidden">
+          WebGPU indisponible — calculs sur le processeur (plus lent).<br>
+          <span id="gpu-reason"></span>
+        </div>
+      </div>
+      <div class="view-tools">
+        <button id="btn-zoom" aria-pressed="false" title="Taille réelle (1 pixel = 1 pixel) ou ajustée à la fenêtre">1:1</button>
+        <button id="btn-fullscreen" aria-label="Plein écran" title="Plein écran">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="readout">
+      <pre id="stats" class="stats">—</pre>
+    </div>
   </section>
 
-  <!-- Camera controls -->
-  <section class="controls">
-    <h3 class="section-title">Paramètres caméra</h3>
-    <div class="control-row control-row--inline">
-      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
-      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" value="8">
+  <!-- ── Rendu et séquence ───────────────────────────────────────────── -->
+  <aside class="panel panel-right" aria-label="Rendu et séquence">
+    <div class="tabs" role="tablist">
+      <button role="tab" class="tab-capture" data-tab="capture" aria-selected="false">Capture</button>
+      <button role="tab" data-tab="render" aria-selected="true">Rendu</button>
+      <button role="tab" data-tab="sequence" aria-selected="false">Séquence</button>
     </div>
-    <div class="control-row control-row--inline">
-      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
-      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" value="1000">
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="sync-camera">Appliquer à la caméra</label>
-      <input type="checkbox" id="sync-camera" checked style="width:auto;">
-    </div>
-  </section>
+    <div class="tab-panels">
 
-  <!-- Stack controls -->
-  <section class="stack-section">
-    <h3 class="section-title">Live Stack</h3>
+      <div class="tab-panel" data-panel="render">
+        <div class="group-title">Étirement</div>
+        <div class="field">
+          <label for="stretch-mode" title="Auto : noir, balance des blancs et force de la courbe déduits de l'image à chaque aperçu (arcsinh à couleurs préservées). Manuel : réglages historiques.">Mode</label>
+          <select id="stretch-mode">
+            <option value="auto" selected>Auto</option>
+            <option value="manual">Manuel</option>
+          </select>
+        </div>
+        <div id="auto-rows" style="display:flex;flex-direction:column;gap:8px;">
+          <div class="slider">
+            <label for="stretch-target" title="Luminosité du fond de ciel à l'écran. Auto : de 10 % au début, quand le stack est encore bruité, à 18 % quand le bruit a baissé">Fond <span class="hint">luminosité</span></label>
+            <input type="range" id="stretch-target" min="5" max="30" step="1" value="18">
+            <span class="range-val" id="stretch-target-val">auto</span>
+          </div>
+          <div class="field check">
+            <label for="stretch-target-auto">Fond automatique</label>
+            <input type="checkbox" id="stretch-target-auto" checked>
+          </div>
+        </div>
+        <div id="manual-rows" class="hidden" style="display:flex;flex-direction:column;gap:8px;">
+          <div class="slider">
+            <label for="stretch-lo">Fond de ciel <span class="hint">percentile noir</span></label>
+            <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+            <span class="range-val" id="stretch-lo-val">0.1 %</span>
+          </div>
+          <div class="slider">
+            <label for="stretch-beta">Arcsinh β <span class="hint">0 = linéaire</span></label>
+            <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+            <span class="range-val" id="stretch-beta-val">0</span>
+          </div>
+          <div class="slider">
+            <label for="stretch-hi">Point blanc <span class="hint">percentile</span></label>
+            <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
+            <span class="range-val" id="stretch-hi-val">99.9 %</span>
+          </div>
+          <div class="field check">
+            <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
+            <input type="checkbox" id="bg-neutral" checked>
+          </div>
+        </div>
 
-    <div class="control-row control-row--inline">
-      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
-      <select id="mode-select"><option value="">—</option></select>
-    </div>
+        <div class="group-title">Contraste et couleur</div>
+        <div class="slider">
+          <label for="local-contrast" title="Renforce les structures larges (bras, bandes de poussière) sans brûler les zones brillantes ; 0 = désactivé. Auto et Manuel">Contraste local</label>
+          <input type="range" id="local-contrast" min="0" max="150" step="5" value="80">
+          <span class="range-val" id="local-contrast-val">80 %</span>
+        </div>
+        <div class="field check">
+          <label for="remove-green" title="Retire l'excès de vert (SCNR neutre moyen) : dominante verte du capteur ou du ciel ; le FITS reste brut">Retirer le vert</label>
+          <input type="checkbox" id="remove-green" checked>
+        </div>
+        <div class="slider">
+          <label for="saturation">Saturation</label>
+          <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+          <span class="range-val" id="saturation-val">100 %</span>
+        </div>
+        <p class="note">Le FITS reste brut : l'étirement n'agit que sur l'aperçu et le PNG.</p>
+      </div>
 
-    <div class="control-row control-row--inline">
-      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
-      <select id="roi-select">
-        <option value="full" selected>Plein champ</option>
-      </select>
-    </div>
+      <div class="tab-panel" data-panel="sequence" hidden>
+        <p class="note">Cumule un nombre fixe d'images avec un gain et une exposition dédiés, puis s'arrête.</p>
+        <div class="field">
+          <label for="seq-count">Images à cumuler</label>
+          <input type="number" id="seq-count" min="1" max="9999" value="30">
+        </div>
+        <div class="field">
+          <label for="seq-gain">Gain</label>
+          <input type="number" id="seq-gain" min="1" max="64" step="0.5" value="8">
+        </div>
+        <div class="field">
+          <label for="seq-expo">Exposition <span class="hint">ms</span></label>
+          <input type="number" id="seq-expo" min="0.1" max="10000" step="0.1" value="1000">
+        </div>
+        <div class="button-pair">
+          <button id="btn-seq-start" class="btn-primary">Lancer la séquence</button>
+          <button id="btn-seq-stop" class="btn-danger hidden">Arrêter la séquence</button>
+        </div>
+        <div class="progress-bar hidden" id="seq-progress-bar">
+          <div class="progress-fill" id="seq-progress-fill"></div>
+          <span class="progress-label" id="seq-progress-label">0 / 0</span>
+        </div>
+        <div id="seq-status" class="seq-status">—</div>
+      </div>
 
-    <div class="control-row control-row--inline">
-      <label for="align-toggle">Alignement étoiles</label>
-      <input type="checkbox" id="align-toggle" checked style="width:auto;">
     </div>
-    <div class="control-row control-row--inline">
-      <label for="dng-files" title="Rejoue une série de fichiers locaux (DNG rpicam-still, FITS brut Bayer, mono ou RGB) à la place de la caméra (lus dans le navigateur, rien n'est envoyé au Pi)">Fichiers <span class="input-hint">(DNG, FITS)</span></label>
-      <input type="file" id="dng-files" accept=".dng,.fit,.fits,.fts" multiple>
-      <button id="dng-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="stretch-mode" title="Auto : noir, balance des blancs et force de la courbe déduits de l'image à chaque aperçu (arcsinh à couleurs préservées). Manuel : réglages historiques.">Étirement</label>
-      <select id="stretch-mode">
-        <option value="auto" selected>Auto</option>
-        <option value="manual">Manuel</option>
-      </select>
-    </div>
-    <div id="auto-rows">
-    <div class="range-row">
-      <label for="stretch-target" title="Luminosité du fond de ciel à l'écran. Auto : de 10 % au début, quand le stack est encore bruité, à 18 % quand le bruit a baissé">Fond <span class="input-hint">(luminosité)</span></label>
-      <input type="range" id="stretch-target" min="5" max="30" step="1" value="18">
-      <span class="range-val" id="stretch-target-val">auto</span>
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="stretch-target-auto">Fond automatique</label>
-      <input type="checkbox" id="stretch-target-auto" checked style="width:auto;">
-    </div>
-    </div>
-    <div id="manual-rows" class="hidden">
-    <div class="range-row">
-      <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
-      <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
-      <span class="range-val" id="stretch-lo-val">0.1 %</span>
-    </div>
-    <div class="range-row">
-      <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
-      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
-      <span class="range-val" id="stretch-beta-val">0</span>
-    </div>
-    <div class="range-row">
-      <label for="stretch-hi">Point blanc <span class="input-hint">(percentile)</span></label>
-      <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
-      <span class="range-val" id="stretch-hi-val">99.9 %</span>
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="bg-neutral" title="Égalise le niveau du fond de ciel des trois couleurs à l'affichage (retire la dominante verte ou bleue) ; le FITS reste brut">Fond neutre</label>
-      <input type="checkbox" id="bg-neutral" checked style="width:auto;">
-    </div>
-    </div>
-    <div class="range-row">
-      <label for="local-contrast" title="Renforce les structures larges (bras, bandes de poussière) sans brûler les zones brillantes ; 0 = désactivé. Auto et Manuel">Contraste local</label>
-      <input type="range" id="local-contrast" min="0" max="150" step="5" value="80">
-      <span class="range-val" id="local-contrast-val">80 %</span>
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="remove-green" title="Retire l'excès de vert (SCNR neutre moyen) : dominante verte du capteur ou du ciel ; le FITS reste brut">Retirer le vert</label>
-      <input type="checkbox" id="remove-green" checked style="width:auto;">
-    </div>
-    <div class="range-row">
-      <label for="saturation">Saturation <span class="input-hint">(couleurs)</span></label>
-      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
-      <span class="range-val" id="saturation-val">100 %</span>
-    </div>
-    <div class="button-row">
-      <button id="btn-start" class="btn-green">▶ Démarrer</button>
-      <button id="btn-stop" class="hidden">■ Arrêter</button>
-      <button id="btn-reset" disabled>↺ Reset</button>
-    </div>
-
-    <div class="button-row">
-      <button id="btn-save-png" disabled>⬇ PNG</button>
-      <button id="btn-save-fits" disabled>⬇ FITS</button>
-    </div>
-
-    <div id="stats" class="stats">—</div>
-  </section>
-
-  <!-- Scheduler -->
-  <section class="scheduler">
-    <h3 class="section-title">Séquence automatique</h3>
-
-    <div class="control-row control-row--inline">
-      <label for="seq-count">Frames à cumuler</label>
-      <input type="number" id="seq-count" class="number-input" min="1" max="9999" value="30">
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="seq-gain">Gain séquence</label>
-      <input type="number" id="seq-gain" class="value-input" min="1" max="64" step="0.5" value="8">
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="seq-expo">Exposition séquence <span class="input-hint">(ms)</span></label>
-      <input type="number" id="seq-expo" class="value-input" min="0.1" max="10000" step="0.1" value="1000">
-    </div>
-
-    <div class="button-row">
-      <button id="btn-seq-start">▶ Lancer séquence</button>
-      <button id="btn-seq-stop" class="hidden">■ Arrêter séquence</button>
-    </div>
-
-    <div class="progress-bar hidden" id="seq-progress-bar">
-      <div class="progress-fill" id="seq-progress-fill"></div>
-      <span class="progress-label" id="seq-progress-label">0 / 0</span>
-    </div>
-
-    <div id="seq-status" class="seq-status">—</div>
-  </section>
-</main>
+  </aside>
+</div>
 
 <script type="module">
+import { initShell } from './ui_shell.js';
 import { StreamingStacker } from './stacker.js';
 import { DngFileSource } from './dng_file_source.js';
 import { FitsFileSource } from './fits_file_source.js';
@@ -669,16 +695,7 @@ function _stopSeq(restore) {
     elSeqStatus.textContent = '—';
 }
 
-// Plein écran
-const btnFs = document.getElementById('btn-fullscreen');
-btnFs.addEventListener('click', () => {
-    const box = document.getElementById('preview-box');
-    if (document.fullscreenElement) document.exitFullscreen();
-    else box.requestFullscreen().catch(e => console.warn('Fullscreen:', e));
-});
-document.addEventListener('fullscreenchange', () => {
-    btnFs.textContent = document.fullscreenElement ? '⊡' : '⛶';
-});
+initShell({ tabsKey: 'live.tab', defaultTab: 'render' });
 </script>
 </body>
 </html>
