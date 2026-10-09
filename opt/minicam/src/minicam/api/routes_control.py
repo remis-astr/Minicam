@@ -27,6 +27,23 @@ _BOOT_CONFIG_PATH = Path("/boot/firmware/config.txt")
 _OVERLAY_RE = re.compile(r"^dtoverlay=imx\d+.*$", re.MULTILINE)
 
 
+def _health() -> dict[str, Any]:
+    """Température du processeur et alarme de sous-tension du Pi (barre
+    d'état de l'interface) ; None si le noyau ne les expose pas."""
+    out: dict[str, Any] = {"cpu_temp_c": None, "undervoltage": None}
+    try:
+        out["cpu_temp_c"] = round(int(Path("/sys/class/thermal/thermal_zone0/temp").read_text()) / 1000, 1)
+    except (OSError, ValueError):
+        pass
+    for hw in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            if (hw / "name").read_text().strip() == "rpi_volt":
+                out["undervoltage"] = (hw / "in0_lcrit_alarm").read_text().strip() == "1"
+        except OSError:
+            pass
+    return out
+
+
 def _handle(camera: Any, msg: dict[str, Any], app: Any = None) -> dict[str, Any] | None:
     cmd = msg.get("cmd")
     if cmd == "ping":
@@ -187,6 +204,12 @@ async def status() -> dict[str, Any]:
 @router.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/system/health")
+async def system_health() -> dict[str, Any]:
+    """Barre d'état de l'interface : interrogé toutes les ~15 s."""
+    return _health()
 
 
 _LED_PATHS = ["/sys/class/leds/ACT", "/sys/class/leds/led0"]

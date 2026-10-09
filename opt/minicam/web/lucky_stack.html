@@ -159,6 +159,10 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
       </div>
     </div>
     <div class="readout">
+      <div class="hist" title="Histogramme de l'image affichée (échelle logarithmique) ; écrêté = part des pixels éclairés qui atteignent le blanc">
+        <canvas id="hist-strip"></canvas>
+        <span id="hist-clip" class="clip"></span>
+      </div>
       <pre id="stats" class="stats">—</pre>
     </div>
   </section>
@@ -298,9 +302,21 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
   </aside>
 </div>
 
+<footer class="statusbar" aria-label="État">
+  <span data-status="source">Source <b>Caméra</b></span>
+  <span data-status="seen">Reçues <b>0</b></span>
+  <span data-status="kept">Retenues <b>0</b></span>
+  <span data-status="rate">Cadence <b>—</b></span>
+  <span class="spacer"></span>
+  <span data-status="gpu">Calcul <b>—</b></span>
+  <span data-status="pi-temp">Pi <b>—</b></span>
+  <span data-status="pi-power">Alimentation <b>—</b></span>
+</footer>
+
 <script type="module">
 import { StreamingStacker } from './stacker.js';
 import { initShell } from './ui_shell.js';
+import { HistogramStrip, StatusBar } from './ui_widgets.js';
 import { SerFileSource, readSerHeader } from './ser_file_source.js';
 import { Mp4FileSource, readMp4Header, mp4OutputSize } from './mp4_file_source.js';
 import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
@@ -460,7 +476,26 @@ let accepted  = 0;
 
 
 // GPU check
-detectGpu().then(({ ok, reason }) => {
+
+// Histogramme de l'image affichée et barre d'état
+const histStrip = new HistogramStrip(canvas, document.getElementById('hist-strip'), document.getElementById('hist-clip'));
+histStrip.start();
+const sbar = new StatusBar();
+sbar.watchHealth();
+const frameRate = sbar.rateMeter();
+function updateStatusBar() {
+    const v = view();
+    const kept = v?.eliteStats ? v.eliteStats.size : (v?.stackedCount ?? 0);
+    const fr = (n) => n.toLocaleString('fr-FR');
+    sbar.set('seen', fr(totalSeen));
+    sbar.set('kept', totalSeen ? `${fr(kept)} (${Math.round(kept / totalSeen * 100)} %)` : fr(kept));
+    const r = stacker ? frameRate.value() : 0;
+    sbar.set('rate', r > 0 ? `${r.toFixed(1).replace('.', ',')} i/s` : '—');
+}
+setInterval(updateStatusBar, 1000);
+
+detectGpu().then(({ ok, reason, name, emulated }) => {
+    sbar.set('gpu', ok ? (name || 'GPU') : 'processeur', ok ? null : 'warn');
     if (!ok) {
         document.getElementById('gpu-warn').classList.remove('hidden');
         document.getElementById('gpu-reason').textContent = reason;
@@ -752,7 +787,9 @@ btnStart.addEventListener('click', async () => {
     stacker.addEventListener('frame', (ev) => {
         totalSeen++;
         if (ev.detail.accepted) accepted++;
+        frameRate.tick();
         updateStats();
+        updateStatusBar();
     });
 
     stacker.addEventListener('preview', () => {
@@ -768,6 +805,7 @@ btnStart.addEventListener('click', async () => {
 
     const serFile = elSerFile.files[0];
     const kind = isMp4(serFile) ? 'MP4' : 'SER';
+    sbar.set('source', serFile ? `${kind} · ${serFile.name}` : 'Caméra');
     const fileOpts = {
         onProgress: (i, n) => { elStatus.textContent = `${kind} ${i} / ${n}`; },
         onEnd: () => {

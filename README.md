@@ -43,6 +43,11 @@ git fetch multicam && git merge multicam/master
   haut pendant qu'on règle, onglets dessous et actions en bas (dont le STOP
   de la monture). Mode nuit rouge (interface et images), choix commun aux
   pages. Polices du système : rien n'est chargé depuis internet.
+  Lucky Stack et Live Stack : histogramme de l'image affichée (échelle
+  logarithmique, part des pixels écrêtés) et barre d'état (images reçues
+  et retenues, cadence, GPU, température et alimentation du Pi via
+  `GET /system/health`). En plein écran, zoom à deux doigts (ou molette),
+  déplacement à un doigt, double-tap pour revenir.
 
 ## Organisation
 
