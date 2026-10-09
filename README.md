@@ -174,6 +174,16 @@ Le dépôt suit l'arborescence du Pi :
   Stack garde l'ancien point blanc.
 - **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
   n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
+- **Déformation locale** : le décalage de chaque pixel est la moyenne des
+  points d'alignement voisins pondérée par une gaussienne qui tombe à zéro
+  au rayon d'influence (4 × patch = 80 px), plus un petit poids « pas de
+  décalage local » : un point isolé (voisins rejetés sur une zone sombre
+  ou peu contrastée) s'estompe vers le recentrage global au lieu de
+  découper un disque de 160 px, d'où les ronds sur la Lune. Index spatial
+  des points (grille de 80 px) : chaque pixel ne parcourt que les 3×3
+  cellules voisines au lieu de tous les points, sinon le coût croît comme
+  le carré de la résolution. Sur deux SER de Jupiter 640×480 (RGB et
+  Bayer), stack à 0,08 et 0,17 % de l'ancien, netteté inchangée.
 - **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel
   profond), contraste (courbe en S) ; ondelettes à trous (4 couches +
   débruitage) et CLAHE appliqués **à la fin** du stack (SER terminé ou

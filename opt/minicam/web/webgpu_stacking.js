@@ -430,6 +430,7 @@ struct Params {
 @group(0) @binding(6) var<storage, read_write> accumG: array<f32>;
 @group(0) @binding(7) var<storage, read_write> accumB: array<f32>;
 @group(0) @binding(8) var<storage, read_write> accumW: array<f32>;
+@group(0) @binding(9) var<storage, read> apGrid: array<u32>;        // index spatial des AP (getApGridBuffer)
 
 fn readPixelFloat32(pixelIdx: u32) -> vec4<f32> {
     let pixelsPerFrame = params.inWidth * params.inHeight;
@@ -522,6 +523,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let influenceRadius = patchSize * 4.0;
     let influenceRadius2 = influenceRadius * influenceRadius;
     let sigma2 = patchSize * 1.5 * patchSize * 1.5 * 2.0;
+    // Poids nul AU rayon d'influence (pas de marche), plus un poids fixe pour
+    // « pas de décalage local » : un AP isolé (voisins rejetés, zone peu
+    // contrastée comme la Lune) s'estompe vers le décalage global au lieu de
+    // s'arrêter net sur un cercle de 2×influenceRadius, visible dans le stack.
+    let cutoffWeight = exp(-influenceRadius2 / sigma2);
+    let priorWeight = 0.05;
 
     // Interpolate displacement from APs (at output pixel center)
     var totalApWeight: f32 = 0.0;
@@ -530,10 +537,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let frameIdx = params.frameIdx;
 
-    for (var i: u32 = 0u; i < params.numAPs; i++) {
+    // Index spatial (getApGridBuffer) : seuls les AP des 3×3 cellules voisines
+    // (côté = rayon d'influence) peuvent peser, au lieu de parcourir tous les AP
+    let gridW = i32(apGrid[0]);
+    let gridH = i32(apGrid[1]);
+    let gridCell = f32(apGrid[2]);
+    let gridIdx0 = 4u + u32(gridW * gridH);
+    let gcx = i32(floor(cellCenterX / gridCell));
+    let gcy = i32(floor(cellCenterY / gridCell));
+    for (var cy = max(gcy - 1, 0); cy <= min(gcy + 1, gridH - 1); cy++) {
+    for (var cx = max(gcx - 1, 0); cx <= min(gcx + 1, gridW - 1); cx++) {
+    let cellIdx = u32(cy * gridW + cx);
+    for (var k = apGrid[3u + cellIdx]; k < apGrid[4u + cellIdx]; k++) {
+        let i = apGrid[gridIdx0 + k];
         let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
-        let apDx = shifts[shiftIdx] + params.searchOffsetX;
-        let apDy = shifts[shiftIdx + 1u] + params.searchOffsetY;
+        let apDx = shifts[shiftIdx];
+        let apDy = shifts[shiftIdx + 1u];
         let quality = shifts[shiftIdx + 2u];
 
         if (quality < params.minQuality) {
@@ -549,20 +568,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dist2 = dx * dx + dy * dy;
 
         if (dist2 < influenceRadius2) {
-            let gaussWeight = exp(-dist2 / sigma2);
+            let gaussWeight = exp(-dist2 / sigma2) - cutoffWeight;
             let weight = gaussWeight * quality;
             weightedDx += apDx * weight;
             weightedDy += apDy * weight;
             totalApWeight += weight;
         }
-    }
+    }}}
 
-    var dispX: f32 = 0.0;
-    var dispY: f32 = 0.0;
-    if (totalApWeight > 0.0) {
-        dispX = weightedDx / totalApWeight;
-        dispY = weightedDy / totalApWeight;
-    }
+    // Décalage global (recentrage) partout, même loin de tout AP valide
+    let dispX = params.searchOffsetX + weightedDx / (totalApWeight + priorWeight);
+    let dispY = params.searchOffsetY + weightedDy / (totalApWeight + priorWeight);
 
     // Compute brightness scale from GPU buffer
     let frameBrightness = brightness[frameIdx];
@@ -723,6 +739,40 @@ let cachedStackConfig = null;
 // Keep at 2 to match analysis phase tuning (3+ caused slowdown due to memory pressure)
 const NUM_FRAME_BUFFERS = 2;
 
+// Index spatial des AP pour les shaders de déformation. Un AP ne pèse qu'à
+// moins du rayon d'influence (4 × patchSize) : grille de cellules de ce côté,
+// le shader ne parcourt que les 3×3 cellules autour du pixel au lieu de tous
+// les AP (coût ∝ pixels × AP, soit ∝ résolution² : prohibitif en grand
+// format). Résultat identique. Disposition (u32) :
+//   [gridW, gridH, côté, début[0..gridW·gridH] (gridW·gridH + 1 entrées), indices des AP…]
+// Mis en cache : les AP sont fixés pour toute une session d'empilement.
+let _apGrid = null;   // { points, patchSize, device, buffer }
+function getApGridBuffer(alignmentPoints, patchSize) {
+    const n = alignmentPoints.length;
+    const c = _apGrid;
+    if (c && c.device === stackDevice && c.patchSize === patchSize && c.n === n
+        && (c.points === alignmentPoints || alignmentPoints.every((p, i) => p.x === c.xs[i] && p.y === c.ys[i])))
+        return c.buffer;
+    const cell = patchSize * 4;
+    const xs = alignmentPoints.map((p) => p.x), ys = alignmentPoints.map((p) => p.y);
+    let maxX = 0, maxY = 0;
+    for (let i = 0; i < n; i++) { maxX = Math.max(maxX, xs[i]); maxY = Math.max(maxY, ys[i]); }
+    const gw = Math.floor(maxX / cell) + 1, gh = Math.floor(maxY / cell) + 1;
+    const cellOf = (i) => Math.floor(ys[i] / cell) * gw + Math.floor(xs[i] / cell);
+    const data = new Uint32Array(3 + gw * gh + 1 + n);
+    data[0] = gw; data[1] = gh; data[2] = cell;
+    const start = 3, idx0 = 3 + gw * gh + 1;
+    for (let i = 0; i < n; i++) data[start + cellOf(i) + 1]++;
+    for (let k = 0; k < gw * gh; k++) data[start + k + 1] += data[start + k];
+    const fill = data.slice(start, start + gw * gh);
+    for (let i = 0; i < n; i++) data[idx0 + fill[cellOf(i)]++] = i;
+    c?.buffer.destroy();
+    const buffer = stackDevice.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    stackQueue.writeBuffer(buffer, 0, data);
+    _apGrid = { points: alignmentPoints, xs, ys, n, patchSize, device: stackDevice, buffer };
+    return buffer;
+}
+
 // Warp + accumulate shader - computes displacement and accumulates in one pass
 const warpAccumulateShader = `
 struct Params {
@@ -758,6 +808,7 @@ struct AP {
 @group(0) @binding(4) var<storage, read_write> accumG: array<f32>;
 @group(0) @binding(5) var<storage, read_write> accumB: array<f32>;
 @group(0) @binding(6) var<storage, read_write> accumW: array<f32>;
+@group(0) @binding(7) var<storage, read> apGrid: array<u32>;        // index spatial des AP (getApGridBuffer)
 
 // Read a pixel as vec4<f32> in 0-255 range
 fn readPixel(pixelIdx: u32) -> vec4<f32> {
@@ -860,13 +911,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let influenceRadius2 = influenceRadius * influenceRadius;
     let sigma = patchSize * 1.5;
     let sigma2 = sigma * sigma * 2.0;
+    // Voir warpAccumulateBatchShader : pas de marche au rayon d'influence,
+    // un AP isolé s'estompe vers le décalage global
+    let cutoffWeight = exp(-influenceRadius2 / sigma2);
+    let priorWeight = 0.05;
 
     // Interpolate displacement from nearby APs
     var totalApWeight: f32 = 0.0;
     var weightedDx: f32 = 0.0;
     var weightedDy: f32 = 0.0;
 
-    for (var i: u32 = 0u; i < params.numAPs; i++) {
+    // Index spatial (getApGridBuffer) : seuls les AP des 3×3 cellules voisines
+    // (côté = rayon d'influence) peuvent peser, au lieu de parcourir tous les AP
+    let gridW = i32(apGrid[0]);
+    let gridH = i32(apGrid[1]);
+    let gridCell = f32(apGrid[2]);
+    let gridIdx0 = 4u + u32(gridW * gridH);
+    let gcx = i32(floor(cellCenterX / gridCell));
+    let gcy = i32(floor(cellCenterY / gridCell));
+    for (var cy = max(gcy - 1, 0); cy <= min(gcy + 1, gridH - 1); cy++) {
+    for (var cx = max(gcx - 1, 0); cx <= min(gcx + 1, gridW - 1); cx++) {
+    let cellIdx = u32(cy * gridW + cx);
+    for (var k = apGrid[3u + cellIdx]; k < apGrid[4u + cellIdx]; k++) {
+        let i = apGrid[gridIdx0 + k];
         let ap = apData[i];
 
         if (ap.quality < params.minQuality) {
@@ -878,20 +945,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dist2 = dx * dx + dy * dy;
 
         if (dist2 < influenceRadius2) {
-            let gaussWeight = exp(-dist2 / sigma2);
+            let gaussWeight = exp(-dist2 / sigma2) - cutoffWeight;
             let weight = gaussWeight * ap.quality;
             weightedDx += ap.dx * weight;
             weightedDy += ap.dy * weight;
             totalApWeight += weight;
         }
-    }
+    }}}
 
-    var dispX = params.globalOffsetX;
-    var dispY = params.globalOffsetY;
-    if (totalApWeight > 0.0) {
-        dispX += weightedDx / totalApWeight;
-        dispY += weightedDy / totalApWeight;
-    }
+    let dispX = params.globalOffsetX + weightedDx / (totalApWeight + priorWeight);
+    let dispY = params.globalOffsetY + weightedDy / (totalApWeight + priorWeight);
 
     let fw = params.frameWeight;
     let bScale = params.brightnessScale;
@@ -1729,7 +1792,8 @@ async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHei
             { binding: 3, resource: { buffer: buffers.accumR } },
             { binding: 4, resource: { buffer: buffers.accumG } },
             { binding: 5, resource: { buffer: buffers.accumB } },
-            { binding: 6, resource: { buffer: buffers.accumW } }
+            { binding: 6, resource: { buffer: buffers.accumW } },
+            { binding: 7, resource: { buffer: getApGridBuffer(alignmentPoints, patchSize) } }
         ]
     });
 
@@ -1855,7 +1919,8 @@ async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth
                     { binding: 3, resource: { buffer: buffers.accumR } },
                     { binding: 4, resource: { buffer: buffers.accumG } },
                     { binding: 5, resource: { buffer: buffers.accumB } },
-                    { binding: 6, resource: { buffer: buffers.accumW } }
+                    { binding: 6, resource: { buffer: buffers.accumW } },
+                    { binding: 7, resource: { buffer: getApGridBuffer(alignmentPoints, patchSize) } }
                 ]
             }));
         }
@@ -2181,7 +2246,8 @@ async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize
                     { binding: 3, resource: { buffer: buffers.accumR } },
                     { binding: 4, resource: { buffer: buffers.accumG } },
                     { binding: 5, resource: { buffer: buffers.accumB } },
-                    { binding: 6, resource: { buffer: buffers.accumW } }
+                    { binding: 6, resource: { buffer: buffers.accumW } },
+                    { binding: 7, resource: { buffer: getApGridBuffer(alignmentPoints, patchSize) } }
                 ]
             }));
         }
@@ -2607,7 +2673,8 @@ async function warpAndAccumulateBatchFullyGpu(
     refBrightness,
     searchOffset,
     minApQuality = 0.3,
-    pixfrac = 1.0
+    pixfrac = 1.0,
+    alignmentPoints = []   // positions des AP (index spatial du shader)
 ) {
     if (!stackDevice || !warpBatchPipeline) {
         throw new Error('Stacking GPU not initialized for batch warp');
@@ -2660,7 +2727,8 @@ async function warpAndAccumulateBatchFullyGpu(
                 { binding: 5, resource: { buffer: buffers.accumR } },
                 { binding: 6, resource: { buffer: buffers.accumG } },
                 { binding: 7, resource: { buffer: buffers.accumB } },
-                { binding: 8, resource: { buffer: buffers.accumW } }
+                { binding: 8, resource: { buffer: buffers.accumW } },
+                { binding: 9, resource: { buffer: getApGridBuffer(alignmentPoints, patchSize) } }
             ]
         });
 
