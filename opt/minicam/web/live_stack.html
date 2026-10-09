@@ -120,6 +120,10 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
       </div>
     </div>
     <div class="readout">
+      <div class="hist" title="Histogramme de l'image affichée (échelle logarithmique) ; écrêté = part des pixels éclairés qui atteignent le blanc">
+        <canvas id="hist-strip"></canvas>
+        <span id="hist-clip" class="clip"></span>
+      </div>
       <pre id="stats" class="stats">—</pre>
     </div>
   </section>
@@ -222,8 +226,20 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
   </aside>
 </div>
 
+<footer class="statusbar" aria-label="État">
+  <span data-status="source">Source <b>Caméra</b></span>
+  <span data-status="seen">Reçues <b>0</b></span>
+  <span data-status="kept">Empilées <b>0</b></span>
+  <span data-status="rate">Cadence <b>—</b></span>
+  <span class="spacer"></span>
+  <span data-status="gpu">Calcul <b>—</b></span>
+  <span data-status="pi-temp">Pi <b>—</b></span>
+  <span data-status="pi-power">Alimentation <b>—</b></span>
+</footer>
+
 <script type="module">
 import { initShell } from './ui_shell.js';
+import { HistogramStrip, StatusBar } from './ui_widgets.js';
 import { StreamingStacker } from './stacker.js';
 import { DngFileSource } from './dng_file_source.js';
 import { FitsFileSource } from './fits_file_source.js';
@@ -273,7 +289,26 @@ let seqGainSave = null;
 let seqExpoSave = null;
 
 // GPU check
-detectGpu().then(({ ok, reason }) => {
+
+// Histogramme de l'image affichée et barre d'état
+const histStrip = new HistogramStrip(canvas, document.getElementById('hist-strip'), document.getElementById('hist-clip'));
+histStrip.start();
+const sbar = new StatusBar();
+sbar.watchHealth();
+const frameRate = sbar.rateMeter();
+let liveSeen = 0;   // images reçues depuis Démarrer
+function updateStatusBar() {
+    const kept = view()?.stackedCount ?? 0;
+    const fr = (n) => n.toLocaleString('fr-FR');
+    sbar.set('seen', fr(liveSeen));
+    sbar.set('kept', fr(kept));
+    const r = stacker ? frameRate.value() : 0;
+    sbar.set('rate', r > 0 ? `${r.toFixed(2).replace('.', ',')} i/s` : '—');
+}
+setInterval(updateStatusBar, 1000);
+
+detectGpu().then(({ ok, reason, name, emulated }) => {
+    sbar.set('gpu', ok ? (name || 'GPU') : 'processeur', ok ? null : 'warn');
     if (!ok) {
         document.getElementById('gpu-warn').classList.remove('hidden');
         document.getElementById('gpu-reason').textContent = reason;
@@ -490,7 +525,10 @@ btnStart.addEventListener('click', async () => {
     });
 
     stacker.addEventListener('frame', () => {
+        liveSeen++;
+        frameRate.tick();
         updateStats();
+        updateStatusBar();
         if (seqRunning) _checkSeqProgress();
     });
 
@@ -509,6 +547,8 @@ btnStart.addEventListener('click', async () => {
     const dngFiles = [...elDngFiles.files];
     const isFits = (f) => /\.(fits?|fts)$/i.test(f.name);
     const kind = !dngFiles.length ? null : dngFiles.every(isFits) ? 'FITS' : dngFiles.some(isFits) ? 'mixte' : 'DNG';
+    sbar.set('source', kind ? `${kind} · ${dngFiles.length} fichiers` : 'Caméra');
+    liveSeen = 0;
     if (kind === 'mixte') {
         elStats.textContent = 'Choisir des fichiers d\'un seul type (DNG ou FITS)';
         stacker = null; _resetUI();

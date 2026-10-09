@@ -199,7 +199,7 @@ details.section[open] > summary::after { content: "−"; }
 .viewport.actual { overflow: auto; align-items: flex-start; justify-content: flex-start; }
 .viewport.actual canvas { max-width: none; max-height: none; margin: auto; image-rendering: pixelated; }
 :root[data-theme="night"] .viewport canvas { filter: url("#night-red"); }   /* filtre SVG de la page : luminance → rouge seul */
-.viewport:fullscreen { background: #000; }
+.viewport:fullscreen { background: #000; touch-action: none; }   /* gestes gérés par ui_shell (zoom à deux doigts) */
 .placeholder { position: absolute; color: var(--muted); font-size: 13px; pointer-events: none; }
 .view-tools { position: absolute; top: 12px; right: 12px; display: flex; gap: 6px; z-index: 2; }
 .view-tools button, .view-chip {
@@ -215,13 +215,31 @@ details.section[open] > summary::after { content: "−"; }
   padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line);
 }
 .stats { margin: 0; font: 12px/1.6 var(--mono); color: var(--text); white-space: pre-wrap; min-height: 3.2em; }
+.readout { align-items: stretch; }
+.hist {
+  position: relative; flex: 1 1 280px; min-width: 0; height: 74px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); overflow: hidden;
+}
+.hist canvas { display: block; width: 100%; height: 100%; }
+.hist .clip { position: absolute; top: 4px; right: 8px; color: var(--muted); font: 11px var(--mono); }
+.hist .clip.warn { color: var(--warn); }
+.readout .stats { flex: 0 1 auto; align-self: center; }
+
+.statusbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px;
+  min-height: 30px; padding: 5px 16px;
+  background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px;
+}
+.statusbar b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+.statusbar .warn b { color: var(--warn); }
+.statusbar .bad b { color: var(--bad); }
 .expo-stats { font: 12px/1.6 var(--mono); color: var(--text); white-space: pre-wrap; }
 
 /* ── Bureau ──────────────────────────────────────────────────────────────── */
 
 @media (min-width: 1000px) {
   html, body { height: 100%; }
-  body.app { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; overflow: hidden; }
+  body.app { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100dvh; overflow: hidden; }
 }
 
 /* ── Mobile et tablette étroite ──────────────────────────────────────────── */
@@ -245,6 +263,8 @@ details.section[open] > summary::after { content: "−"; }
   .viewport { height: 44vh; flex: none; }
   .readout { padding: 6px 12px; }
   .stats { font-size: 11px; min-height: 0; }
+  .hist { flex-basis: 100%; height: 46px; }
+  .statusbar { padding: 6px 12px; gap: 2px 14px; }
   .panel-right { order: 2; border-left: 0; overflow: visible; }
   .panel-left  { order: 3; border-right: 0; overflow: visible; }
   .tab-panels { overflow: visible; }
