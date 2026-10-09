@@ -26,6 +26,13 @@ une page web (téléphone ou PC) servie par le Pi lui-même.
 - Trames RAW brutes pour un autoguideur externe (`/guide/frame`,
   page `guidage.html`) et relais réseau vers ce contrôleur
 
+- Interface commune à toutes les pages (`web/ui.css`, `web/ui_shell.js`) :
+  sur ordinateur, image au centre, acquisition à gauche, réglages à droite
+  en onglets, sans défilement de la page ; sur téléphone, image collée en
+  haut pendant qu'on règle, onglets dessous et actions en bas (dont le STOP
+  de la monture). Mode nuit rouge (interface et images), choix commun aux
+  pages. Polices du système : rien n'est chargé depuis internet.
+
 ## Organisation
 
 Le dépôt suit l'arborescence du Pi :

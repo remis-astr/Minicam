@@ -225,7 +225,7 @@ elFullscreen.addEventListener('click', toggleFullscreen);
 elPreviewBox.addEventListener('dblclick', toggleFullscreen);
 
 document.addEventListener('fullscreenchange', () => {
-  elFullscreen.textContent = document.fullscreenElement ? '✕' : '⛶';
+  elFullscreen.setAttribute('aria-pressed', document.fullscreenElement ? 'true' : 'false');
 });
 
 elReconnect.addEventListener('click', () => {
@@ -240,9 +240,15 @@ const previewCtx      = elPreviewCanvas.getContext('2d');
 let   previewRunning  = false;
 let   previewLoopActive = false;  // une seule boucle à la fois
 
+// La scène (#preview-stage) prend le rapport de l'image reçue et tient dans
+// la zone d'affichage (ui.css) : le canvas la remplit, l'image n'est jamais
+// déformée et les clics de l'aide à la mise au point restent exacts.
+const elPreviewStage = document.getElementById('preview-stage');
+let previewAspect = 0;
+
 function resizePreviewCanvas() {
-  const w = elPreviewBox.clientWidth;
-  const h = elPreviewBox.clientHeight;
+  const w = elPreviewStage.clientWidth;
+  const h = elPreviewStage.clientHeight;
   if (w > 0 && h > 0 && (elPreviewCanvas.width !== w || elPreviewCanvas.height !== h)) {
     elPreviewCanvas.width  = w;
     elPreviewCanvas.height = h;
@@ -271,6 +277,11 @@ async function previewLoop() {
       } else {
         const blob = await resp.blob();
         const bmp  = await createImageBitmap(blob);
+        const ar = bmp.width / bmp.height;
+        if (Math.abs(ar - previewAspect) > 1e-3) {
+          previewAspect = ar;
+          elPreviewStage.style.setProperty('--ar', ar.toFixed(4));
+        }
         resizePreviewCanvas();
         previewCtx.drawImage(bmp, 0, 0, elPreviewCanvas.width, elPreviewCanvas.height);
         bmp.close();
@@ -295,8 +306,8 @@ offCanvas.height = 180;
 const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
 
 function resizeHistCanvas() {
-  elHistCanvas.width  = elPreviewBox.clientWidth;
-  elHistCanvas.height = elPreviewBox.clientHeight;
+  elHistCanvas.width  = elPreviewStage.clientWidth;
+  elHistCanvas.height = elPreviewStage.clientHeight;
 }
 
 function _drawHistFromImageData(data) {

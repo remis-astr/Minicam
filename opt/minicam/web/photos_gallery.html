@@ -2,45 +2,63 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Galerie Photos — MiniCam</title>
-<link rel="stylesheet" href="/static/style.css">
-<style>
-.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
-.back-link:hover { color: #adf; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Galerie photos — MiniCam</title>
+<script>
+try { if (localStorage.getItem('minicam.theme') === 'night') document.documentElement.dataset.theme = 'night'; } catch {}
+</script>
+<link rel="stylesheet" href="/static/ui.css">
 </head>
-<body>
-<header>
-  <h1>Galerie Photos</h1>
-  <a href="/" class="back-link">&larr; MiniCam</a>
+<body class="app simple">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="night-red" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.30 0.59 0.11 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+<header class="topbar">
+  <a class="brand" href="/">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h3M17 12h3M12 4v3M12 17v3"/></svg>
+    MiniCam
+  </a>
+  <nav class="pages" aria-label="Pages">
+    <a href="/">Caméra</a>
+    <a href="/static/lucky_stack.html">Lucky Stack</a>
+    <a href="/static/live_stack.html">Live Stack</a>
+    <a href="/static/guidage.html">Guidage</a>
+    <a href="/static/photos_gallery.html" aria-current="page">Galerie</a>
+  </nav>
+  <div class="spacer"></div>
+  <button id="btn-theme" class="btn-ghost" aria-pressed="false" title="Mode nuit : tout en rouge sombre, pour garder la vision nocturne">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+    <span>Nuit</span>
+  </button>
 </header>
 
-<main>
-  <section class="gallery-section">
-    <div class="gallery-header">
-      <h3 class="section-title">Photos</h3>
-      <div class="gallery-actions">
-        <button id="btn-photos-refresh" class="btn-small">&#8635; Actualiser</button>
-        <button id="btn-photos-purge" class="btn-small btn-danger-sm">&#128465; Tout supprimer</button>
-      </div>
+<main class="page">
+  <div class="gallery-header">
+    <div>
+      <h1 style="margin:0;font-size:18px;font-weight:600;">Photos</h1>
+      <div id="photos-disk" class="gallery-disk"></div>
     </div>
-    <div id="photos-disk" class="gallery-disk"></div>
-    <div id="photos-empty" class="gallery-empty hidden">Aucune photo.</div>
-    <div id="photos-list" class="gallery-list"></div>
-  </section>
+    <div class="gallery-actions">
+      <button id="btn-photos-refresh">Actualiser</button>
+      <button id="btn-photos-purge" class="btn-danger-sm">Tout supprimer</button>
+    </div>
+  </div>
+  <div id="photos-empty" class="gallery-empty hidden">Aucune photo.</div>
+  <div id="photos-list" class="gallery-list grid"></div>
 </main>
 
 <div id="viewer-overlay" class="viewer-overlay hidden">
   <div class="viewer-topbar">
     <span id="viewer-title" class="viewer-title"></span>
     <span id="viewer-counter" class="viewer-counter"></span>
-    <button id="btn-viewer-close" class="viewer-close-btn">&#10005;</button>
+    <button id="btn-viewer-close" class="viewer-close-btn" aria-label="Fermer">&#10005;</button>
   </div>
   <div class="viewer-imgwrap">
-    <button id="btn-viewer-prev" class="viewer-nav viewer-nav-prev">&#10094;</button>
+    <button id="btn-viewer-prev" class="viewer-nav viewer-nav-prev" aria-label="Précédente">&#10094;</button>
     <img id="viewer-img" class="viewer-img" src="" alt="">
-    <button id="btn-viewer-next" class="viewer-nav viewer-nav-next">&#10095;</button>
+    <button id="btn-viewer-next" class="viewer-nav viewer-nav-next" aria-label="Suivante">&#10095;</button>
   </div>
 </div>
 
@@ -185,6 +203,10 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft'  && _viewerIdx > 1)            { _viewerIdx--; _viewerLoad(); }
   if (e.key === 'ArrowRight' && _viewerIdx < _viewerCount) { _viewerIdx++; _viewerLoad(); }
 });
+</script>
+<script type="module">
+import { initShell } from './ui_shell.js';
+initShell();
 </script>
 </body>
 </html>

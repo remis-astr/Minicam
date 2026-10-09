@@ -2,197 +2,228 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Guidage M8S</title>
-<link rel="stylesheet" href="/static/style.css">
-<style>
-  /* Page de pilotage du M8S (monture OnStep, plate solve, autoguidage).
-     Tout le calcul se fait sur le M8S : cette page ne fait qu'afficher et
-     appeler son API (port 8080, relayé par allsky). Aucune ressource
-     externe : au jardin, le téléphone n'a pas internet. */
-  .g-section { width: 100%; max-width: 800px; background: #1a1a1a; border: 1px solid #333;
-               border-radius: 6px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.6rem; }
-  .g-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.4rem 0.8rem; }
-  .g-kv { display: flex; flex-direction: column; font-size: 0.8rem; color: #999; }
-  .g-kv b { font-size: 1rem; color: #eee; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .g-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
-  .g-row button, .g-row select, .g-row input { min-height: 40px; }
-  .g-row input, .g-row select { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 0 0.5rem; }
-  .g-row input { width: 7.5rem; }
-  .g-msg { font-size: 0.85rem; color: #bbb; min-height: 1.2em; }
-  .g-warn { background: #3a2a10; border: 1px solid #6a4a1a; color: #fc6; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; }
-  .g-err  { background: #3a1a1a; border: 1px solid #6a2a2a; color: #f88; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; }
-  .g-ok   { color: #6d6; }
-  .g-preview { position: relative; width: 100%; background: #000; border: 1px solid #333; border-radius: 4px;
-               aspect-ratio: 16/9; overflow: hidden; }
-  .g-preview img { width: 100%; height: 100%; object-fit: contain; display: block; cursor: crosshair; }
-  .g-preview .g-hint { position: absolute; left: 0.5rem; bottom: 0.4rem; font-size: 0.75rem; color: #aaa;
-                       background: rgba(0,0,0,0.55); padding: 2px 6px; border-radius: 3px; }
-  canvas.g-chart { width: 100%; height: 190px; background: #0c0c0c; border: 1px solid #333; border-radius: 4px; }
-  .g-legend { display: flex; gap: 1rem; font-size: 0.8rem; }
-  .g-legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
-                           margin-right: 4px; vertical-align: -1px; background: var(--c); }
-  .g-rms { display: flex; gap: 1rem; font-variant-numeric: tabular-nums; font-size: 0.95rem; }
-  .g-log { font-family: ui-monospace, monospace; font-size: 0.75rem; color: #aaa; max-height: 9rem;
-           overflow-y: auto; white-space: pre-wrap; background: #111; border-radius: 4px; padding: 0.4rem; }
-  details summary { cursor: pointer; color: #aaa; font-size: 0.9rem; }
-  .g-settings { display: grid; grid-template-columns: 1fr auto; gap: 0.35rem 0.6rem; align-items: center;
-                font-size: 0.85rem; margin-top: 0.5rem; }
-  .g-settings input, .g-settings select { width: 6.5rem; min-height: 34px; background: #222; color: #eee;
-                border: 1px solid #444; border-radius: 4px; padding: 0 0.4rem; }
-  .btn-primary { background: #1a4a8a; }
-  a.g-back { color: #8bf; text-decoration: none; font-size: 0.9rem; }
-  .badge-sim { background: #640; color: #fff; }
-  /* Raquette : maintien du doigt = mouvement (sécurité « homme mort » côté M8S) */
-  .pad { display: grid; grid-template-columns: repeat(3, 72px); grid-template-rows: repeat(3, 60px);
-         gap: 6px; justify-content: center; margin: 0.3rem 0; touch-action: none; user-select: none;
-         -webkit-user-select: none; -webkit-touch-callout: none; }
-  .pad button { font-size: 1rem; font-weight: 600; padding: 0; border-radius: 8px; background: #2a2a3a;
-                touch-action: none; }
-  .pad button small { display: block; font-size: 0.65rem; font-weight: 400; color: #aaa; }
-  .pad button.held { background: #3a6ab0; }
-  .pad .pad-stop { background: #6a1a1a; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Guidage M8S — MiniCam</title>
+<script>
+try { if (localStorage.getItem('minicam.theme') === 'night') document.documentElement.dataset.theme = 'night'; } catch {}
+</script>
+<!-- Pilotage du M8S (monture OnStep, plate solve, autoguidage) : tout le
+     calcul se fait sur le M8S, cette page affiche et appelle son API (port
+     8080, relayé par allsky). Aucune ressource externe : au jardin, le
+     téléphone n'a pas internet. -->
+<link rel="stylesheet" href="/static/ui.css">
 </head>
-<body>
-<header>
-  <h1>Guidage M8S</h1>
+<body class="app" data-tab="guide">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="night-red" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.30 0.59 0.11 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+<header class="topbar">
+  <a class="brand" href="/">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h3M17 12h3M12 4v3M12 17v3"/></svg>
+    MiniCam
+  </a>
+  <nav class="pages" aria-label="Pages">
+    <a href="/">Caméra</a>
+    <a href="/static/lucky_stack.html">Lucky Stack</a>
+    <a href="/static/live_stack.html">Live Stack</a>
+    <a href="/static/guidage.html" aria-current="page">Guidage</a>
+    <a href="/static/photos_gallery.html">Galerie</a>
+  </nav>
   <span id="m8s-badge" class="badge connecting">M8S…</span>
-  <span id="sim-badge" class="badge badge-sim hidden">SIMULATION</span>
-  <a class="g-back" href="/">← Caméra</a>
+  <span id="sim-badge" class="badge badge-sim hidden">Simulation</span>
+  <div class="spacer"></div>
+  <button id="btn-theme" class="btn-ghost" aria-pressed="false" title="Mode nuit : tout en rouge sombre, pour garder la vision nocturne">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+    <span>Nuit</span>
+  </button>
+  <div class="actions">
+    <button id="btn-guide" class="btn-primary">
+      <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4l13 8-13 8z"/></svg>Guider
+    </button>
+    <button id="btn-guide-stop">Arrêter le guidage</button>
+    <button id="btn-stop" class="btn-danger" title="Arrêt immédiat de tout mouvement de la monture">STOP</button>
+  </div>
 </header>
 
-<main>
-  <!-- ============================================================ MONTURE -->
-  <section class="g-section" id="sec-mount">
-    <h3 class="section-title">Monture</h3>
-    <div id="mount-alert" class="g-err hidden"></div>
-    <div id="time-alert" class="g-warn hidden"></div>
-    <div class="g-grid">
-      <div class="g-kv">Type<b id="m-type">—</b></div>
-      <div class="g-kv">Suivi<b id="m-track">—</b></div>
-      <div class="g-kv">AD<b id="m-ra">—</b></div>
-      <div class="g-kv">Déc<b id="m-dec">—</b></div>
-      <div class="g-kv">Hauteur<b id="m-alt">—</b></div>
-      <div class="g-kv">Azimut<b id="m-az">—</b></div>
-      <div class="g-kv">Heure E4 (UTC)<b id="m-utc">—</b></div>
-      <div class="g-kv">Contrôleur<b id="m-ctrl">—</b></div>
-    </div>
-    <div class="g-row">
-      <button id="btn-track-on">▶ Suivi</button>
-      <button id="btn-track-off">■ Arrêt suivi</button>
-      <button id="btn-stop" class="btn-danger">✋ STOP</button>
-    </div>
-    <details id="pad-box">
-      <summary>Raquette</summary>
-      <div class="g-row" style="margin-top:0.5rem; justify-content:center">
-        <label>Vitesse <select id="pad-rate"></select></label>
+<div class="workspace">
+
+  <!-- ── Monture et caméra guide ─────────────────────────────────────── -->
+  <aside class="panel panel-left" aria-label="Monture">
+    <details class="section" open id="sec-mount">
+      <summary>Monture</summary>
+      <div class="section-body">
+        <div id="mount-alert" class="g-err hidden"></div>
+        <div id="time-alert" class="g-warn hidden"></div>
+        <div class="kv-grid">
+          <div class="g-kv">Type<b id="m-type">—</b></div>
+          <div class="g-kv">Suivi<b id="m-track">—</b></div>
+          <div class="g-kv">AD<b id="m-ra">—</b></div>
+          <div class="g-kv">Déc<b id="m-dec">—</b></div>
+          <div class="g-kv">Hauteur<b id="m-alt">—</b></div>
+          <div class="g-kv">Azimut<b id="m-az">—</b></div>
+          <div class="g-kv">Heure (UTC)<b id="m-utc">—</b></div>
+          <div class="g-kv">Contrôleur<b id="m-ctrl">—</b></div>
+        </div>
+        <div class="button-pair">
+          <button id="btn-track-on">Suivi actif</button>
+          <button id="btn-track-off">Arrêt du suivi</button>
+        </div>
+        <details id="pad-box" class="sub">
+          <summary>Raquette</summary>
+          <div class="field">
+            <label for="pad-rate">Vitesse</label>
+            <select id="pad-rate"></select>
+          </div>
+          <div class="pad">
+            <span></span><button data-dir="n"><span class="lbl">N</span><small class="sub"></small></button><span></span>
+            <button data-dir="e"><span class="lbl">E</span><small class="sub"></small></button>
+            <button class="pad-stop" id="pad-stop">STOP</button>
+            <button data-dir="w"><span class="lbl">O</span><small class="sub"></small></button>
+            <span></span><button data-dir="s"><span class="lbl">S</span><small class="sub"></small></button><span></span>
+          </div>
+          <p class="note" id="pad-info">Maintenir le bouton appuyé : la monture s'arrête dès qu'on relâche (ou si la liaison se coupe). Indisponible pendant le guidage et l'alignement.</p>
+        </details>
+        <details class="sub">
+          <summary>GoTo par coordonnées (JNow)</summary>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <input id="goto-ra" type="text" placeholder="AD hh:mm:ss" inputmode="decimal" aria-label="Ascension droite">
+            <input id="goto-dec" type="text" placeholder="Déc ±dd:mm:ss" inputmode="decimal" aria-label="Déclinaison">
+            <div class="button-pair">
+              <button id="btn-goto">GoTo</button>
+              <button id="btn-center">GoTo + centrage</button>
+            </div>
+          </div>
+        </details>
+        <div id="mount-msg" class="g-msg"></div>
       </div>
-      <div class="pad">
-        <span></span><button data-dir="n"><span class="lbl">N</span><small class="sub"></small></button><span></span>
-        <button data-dir="e"><span class="lbl">E</span><small class="sub"></small></button>
-        <button class="pad-stop" id="pad-stop">STOP</button>
-        <button data-dir="w"><span class="lbl">O</span><small class="sub"></small></button>
-        <span></span><button data-dir="s"><span class="lbl">S</span><small class="sub"></small></button><span></span>
-      </div>
-      <p class="indi-info" id="pad-info">Maintenir le bouton appuyé : la monture s'arrête dès qu'on relâche (ou si la liaison se coupe). Indisponible pendant le guidage et l'alignement.</p>
     </details>
-    <details>
-      <summary>GoTo par coordonnées (JNow)</summary>
-      <div class="g-row" style="margin-top:0.5rem">
-        <input id="goto-ra" placeholder="AD hh:mm:ss" inputmode="decimal">
-        <input id="goto-dec" placeholder="Déc ±dd:mm:ss" inputmode="decimal">
-        <button id="btn-goto">GoTo</button>
-        <button id="btn-center">GoTo + centrage</button>
+
+    <details class="section" open id="sec-cam">
+      <summary>Caméra guide</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="cam-mode">Mode</label>
+          <select id="cam-mode"></select>
+        </div>
+        <div class="field">
+          <label for="cam-expo">Pose <span class="hint">ms</span></label>
+          <input id="cam-expo" type="number" min="1" max="120000" step="50">
+        </div>
+        <div class="field">
+          <label for="cam-gain">Gain</label>
+          <input id="cam-gain" type="number" min="1" max="64" step="0.5">
+        </div>
+        <div class="field">
+          <label for="cam-focal">Focale guide <span class="hint">mm</span></label>
+          <input id="cam-focal" type="number" min="20" max="5000" step="1">
+        </div>
+        <p class="note">Mêmes réglages que la page Caméra ; le M8S ne les modifie jamais. Un mode recadré réduit la latence (≈ 0,85 s en 2028×1080, ≈ 0,17 s en 480p) mais contient moins d'étoiles : résoudre de préférence dans un mode large.</p>
+        <div id="cam-msg" class="g-msg"></div>
       </div>
     </details>
-    <div id="mount-msg" class="g-msg"></div>
-  </section>
+  </aside>
 
-  <!-- ============================================================ CAMERA -->
-  <section class="g-section" id="sec-cam">
-    <h3 class="section-title">Caméra guide (allsky)</h3>
-    <p class="indi-info">Réglages de la caméra, identiques à ceux de la page principale. Le M8S ne les modifie jamais : il utilise l'image telle que réglée ici. Un mode recadré réduit la latence de calcul (≈0,85 s en 2028×1080, ≈0,17 s en 480p) mais contient moins d'étoiles ; solver de préférence dans un mode large.</p>
-    <div class="g-row">
-      <label>Mode <select id="cam-mode"></select></label>
-      <label>Pose (ms) <input id="cam-expo" type="number" min="1" max="120000" step="50"></label>
-      <label>Gain <input id="cam-gain" type="number" min="1" max="64" step="0.5"></label>
-      <label>Focale optique guide (mm) <input id="cam-focal" type="number" min="20" max="5000" step="1"></label>
-    </div>
-    <div id="cam-msg" class="g-msg"></div>
-  </section>
-
-  <!-- ========================================================= ALIGNEMENT -->
-  <section class="g-section" id="sec-align">
-    <h3 class="section-title">Plate solve &amp; alignement</h3>
-    <div class="g-row">
-      <button id="btn-solve">Résoudre</button>
-      <button id="btn-solve-sync" class="btn-primary">Résoudre + recaler</button>
-    </div>
-    <div class="g-row">
-      <label>Alignement <select id="align-mode">
-        <option value="manual" selected>manuel (visée à la raquette)</option>
-        <option value="auto">automatique (GoTo)</option>
-      </select></label>
-      <label>Points <select id="align-n">
-        <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
-      </select></label>
-    </div>
-    <div class="g-row" id="align-auto-opts">
-      <label>Ciel dégagé vers <select id="align-az">
-        <option value="0">N</option><option value="45">NE</option><option value="90">E</option><option value="135">SE</option>
-        <option value="180" selected>S</option><option value="225">SO</option><option value="270">O</option><option value="315">NO</option>
-      </select></label>
-      <label>Étendue <select id="align-span"><option>60</option><option selected>90</option><option>120</option><option>180</option></select>°</label>
-      <label>Hauteurs <select id="align-alts"><option value="30,55">30–55°</option><option value="35,65" selected>35–65°</option><option value="45,70">45–70°</option></select></label>
-    </div>
-    <p class="indi-info" id="align-help">Manuel : lancer, puis viser une zone dégagée à la raquette et « Ajouter ce point ». Écarter les points d'au moins 60° et varier les hauteurs.</p>
-    <div class="g-row">
-      <button id="btn-align" class="btn-primary">Démarrer l'alignement (monture en position home)</button>
-      <button id="btn-align-add" class="btn-primary hidden">Ajouter ce point</button>
-      <button id="btn-align-abort" class="btn-danger hidden">Interrompre</button>
-    </div>
-    <div id="align-sep" class="g-msg"></div>
-    <div id="solve-result" class="g-msg"></div>
-    <div id="align-log" class="g-log hidden"></div>
-  </section>
-
-  <!-- ============================================================ GUIDAGE -->
-  <section class="g-section" id="sec-guide">
-    <h3 class="section-title">Autoguidage</h3>
-    <div class="g-preview">
-      <img id="g-preview" alt="Image de guidage">
+  <!-- ── Image de guidage ────────────────────────────────────────────── -->
+  <section class="view no-sticky" aria-label="Image de guidage" id="sec-guide">
+    <div class="viewport">
+      <img id="g-preview" class="g-preview-img" alt="Image de guidage">
       <span class="g-hint">Touchez l'image pour placer le pivot (axe de l'instrument principal)</span>
     </div>
-    <div class="g-grid">
-      <div class="g-kv">État<b id="g-state">—</b></div>
-      <div class="g-kv">Étoiles<b id="g-stars">—</b></div>
-      <div class="g-kv">Image<b id="g-frame">—</b></div>
-      <div class="g-kv">Rotation de champ<b id="g-rot">—</b></div>
-    </div>
-    <div id="g-msg" class="g-msg"></div>
-    <div class="g-row">
-      <button id="btn-calib">Calibrer</button>
-      <button id="btn-guide" class="btn-primary">▶ Guider</button>
-      <button id="btn-guide-stop" class="btn-danger">■ Arrêter</button>
-      <button id="btn-pivot-center">Pivot au centre</button>
-    </div>
-    <div class="g-rms">RMS <span>AD <b id="rms-ra">—</b></span><span>Déc <b id="rms-dec">—</b></span><span>Total <b id="rms-tot">—</b></span></div>
-    <canvas id="g-chart" class="g-chart"></canvas>
-    <div class="g-legend">
-      <span style="--c:#4aa3ff">AD (″)</span><span style="--c:#ff6a5a">Déc (″)</span>
-      <span style="--c:#555">impulsions</span>
-    </div>
-    <div id="calib-info" class="g-msg"></div>
-    <details>
-      <summary>Réglages du guidage</summary>
-      <div class="g-settings" id="g-settings"></div>
-      <div class="g-row" style="margin-top:0.6rem">
-        <label><input type="checkbox" id="sim-toggle"> Mode simulation (ciel et monture simulés, pour les essais)</label>
+    <div class="readout" style="flex-direction:column;gap:8px;">
+      <div class="kv-grid" style="grid-template-columns:repeat(4,minmax(0,1fr));">
+        <div class="g-kv">État<b id="g-state">—</b></div>
+        <div class="g-kv">Étoiles<b id="g-stars">—</b></div>
+        <div class="g-kv">Image<b id="g-frame">—</b></div>
+        <div class="g-kv">Rotation de champ<b id="g-rot">—</b></div>
       </div>
-    </details>
+      <div class="g-rms">RMS <span>AD <b id="rms-ra">—</b></span><span>Déc <b id="rms-dec">—</b></span><span>Total <b id="rms-tot">—</b></span></div>
+      <canvas id="g-chart" class="g-chart"></canvas>
+      <div class="g-legend">
+        <span style="--c:#4aa3ff">AD (″)</span><span style="--c:#ff6a5a">Déc (″)</span>
+        <span style="--c:#555">impulsions</span>
+      </div>
+    </div>
   </section>
-</main>
+
+  <!-- ── Alignement et guidage ───────────────────────────────────────── -->
+  <aside class="panel panel-right" aria-label="Alignement et guidage">
+    <div class="tabs" role="tablist">
+      <button role="tab" class="tab-capture" data-tab="capture" aria-selected="false">Monture</button>
+      <button role="tab" data-tab="align" aria-selected="false">Alignement</button>
+      <button role="tab" data-tab="guide" aria-selected="true">Guidage</button>
+    </div>
+    <div class="tab-panels">
+
+      <div class="tab-panel" data-panel="align" id="sec-align" hidden>
+        <div class="group-title">Plate solve</div>
+        <div class="button-pair">
+          <button id="btn-solve">Résoudre</button>
+          <button id="btn-solve-sync" class="btn-primary">Résoudre + recaler</button>
+        </div>
+        <div id="solve-result" class="g-msg"></div>
+
+        <div class="group-title">Alignement de la monture</div>
+        <div class="field">
+          <label for="align-mode">Méthode</label>
+          <select id="align-mode">
+            <option value="manual" selected>Manuelle (raquette)</option>
+            <option value="auto">Automatique (GoTo)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="align-n">Points</label>
+          <select id="align-n">
+            <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+          </select>
+        </div>
+        <div id="align-auto-opts" style="display:flex;flex-direction:column;gap:8px;">
+          <div class="field">
+            <label for="align-az">Ciel dégagé vers</label>
+            <select id="align-az">
+              <option value="0">N</option><option value="45">NE</option><option value="90">E</option><option value="135">SE</option>
+              <option value="180" selected>S</option><option value="225">SO</option><option value="270">O</option><option value="315">NO</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="align-span">Étendue <span class="hint">°</span></label>
+            <select id="align-span"><option>60</option><option selected>90</option><option>120</option><option>180</option></select>
+          </div>
+          <div class="field">
+            <label for="align-alts">Hauteurs</label>
+            <select id="align-alts"><option value="30,55">30–55°</option><option value="35,65" selected>35–65°</option><option value="45,70">45–70°</option></select>
+          </div>
+        </div>
+        <p class="note" id="align-help">Manuel : lancer, puis viser une zone dégagée à la raquette et « Ajouter ce point ». Écarter les points d'au moins 60° et varier les hauteurs.</p>
+        <button id="btn-align" class="btn-primary">Démarrer l'alignement (monture en position home)</button>
+        <div class="button-pair">
+          <button id="btn-align-add" class="btn-primary hidden">Ajouter ce point</button>
+          <button id="btn-align-abort" class="btn-danger hidden">Interrompre</button>
+        </div>
+        <div id="align-sep" class="g-msg"></div>
+        <div id="align-log" class="g-log hidden"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="guide">
+        <div class="group-title">Autoguidage</div>
+        <div class="button-pair">
+          <button id="btn-calib">Calibrer</button>
+          <button id="btn-pivot-center">Pivot au centre</button>
+        </div>
+        <div id="g-msg" class="g-msg"></div>
+        <div id="calib-info" class="g-msg"></div>
+        <div class="group-title">Réglages du guidage</div>
+        <div class="g-settings" id="g-settings"></div>
+        <div class="field check">
+          <label for="sim-toggle">Mode simulation <span class="hint">ciel et monture simulés, pour les essais</span></label>
+          <input type="checkbox" id="sim-toggle">
+        </div>
+      </div>
+
+    </div>
+  </aside>
+</div>
 
 <script>
 'use strict';
@@ -594,6 +625,10 @@ pollMount(); pollTime(); pollGuide(); pollAlign();
 setInterval(() => { if (!document.hidden) pollMount(); }, 3000);
 setInterval(() => { if (!document.hidden) pollTime(); }, 30000);
 setInterval(() => { if (!document.hidden) pollGuide(); }, 1500);
+</script>
+<script type="module">
+import { initShell } from './ui_shell.js';
+initShell({ tabsKey: 'guide.tab', defaultTab: 'guide', viewport: false });
 </script>
 </body>
 </html>

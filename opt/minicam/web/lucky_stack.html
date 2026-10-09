@@ -2,283 +2,304 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Lucky Stack — MiniCam</title>
-<link rel="stylesheet" href="/static/style.css">
-<style>
-.stack-section {
-  width: 100%; max-width: 800px;
-  display: flex; flex-direction: column; gap: 1rem;
-  border: 1px solid #2a4a2a; border-radius: 6px; padding: 1rem;
-  background: #161e16;
-}
-.stats {
-  font-size: 0.85rem; color: #8bb; font-family: monospace;
-  min-height: 2.4em; line-height: 1.7; white-space: pre;
-}
-.gpu-warn {
-  background: #3a2a10; border: 1px solid #6a4a20; border-radius: 4px;
-  padding: 0.75rem; font-size: 0.8rem; color: #da8; line-height: 1.4;
-}
-.range-row {
-  display: flex; align-items: center; gap: 0.75rem;
-}
-.range-row label { flex: 1; font-size: 0.85rem; color: #aaa; }
-.range-row input[type=range] { flex: 2; accent-color: #48a; }
-.range-val { width: 3.5rem; text-align: right; font-size: 0.85rem; color: #ddd; flex-shrink: 0; }
-.back-link { font-size: 0.85rem; color: #7ab; text-decoration: none; }
-.back-link:hover { color: #adf; }
-.btn-green  { background: #2a5a2a; }
-.btn-green:hover:not(:disabled) { background: #3a7a3a; }
-.btn-orange { background: #6a4a10; }
-.btn-orange:hover:not(:disabled) { background: #9a6a18; }
-/* La preview-box s'adapte au canvas (pas de 16/9 forcé) */
-#preview-box { aspect-ratio: unset; height: auto; min-height: 200px; }
-#stack-canvas { display: block; width: 100%; height: auto; }
-#preview-box:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
-#preview-box:fullscreen #stack-canvas { width: auto; max-width: 100vw; max-height: 100vh; }
-</style>
+<script>
+// Thème avant le premier rendu (pas de flash clair → nuit)
+try { if (localStorage.getItem('minicam.theme') === 'night') document.documentElement.dataset.theme = 'night'; } catch {}
+</script>
+<link rel="stylesheet" href="/static/ui.css">
 </head>
-<body>
-<header>
-  <a href="/" class="back-link">← MiniCam</a>
-  <h1>Lucky Stack</h1>
+<body class="app" data-tab="stack">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="night-red" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.30 0.59 0.11 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+<header class="topbar">
+  <a class="brand" href="/">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h3M17 12h3M12 4v3M12 17v3"/></svg>
+    MiniCam
+  </a>
+  <nav class="pages" aria-label="Pages">
+    <a href="/">Caméra</a>
+    <a href="/static/lucky_stack.html" aria-current="page">Lucky Stack</a>
+    <a href="/static/live_stack.html">Live Stack</a>
+    <a href="/static/guidage.html">Guidage</a>
+    <a href="/static/photos_gallery.html">Galerie</a>
+  </nav>
   <span id="ws-status" class="badge disconnected">Déconnecté</span>
+  <div class="spacer"></div>
+  <button id="btn-theme" class="btn-ghost" aria-pressed="false" title="Mode nuit : tout en rouge sombre, pour garder la vision nocturne">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+    <span>Nuit</span>
+  </button>
+  <div class="actions">
+    <button id="btn-start" class="btn-primary">
+      <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4l13 8-13 8z"/></svg>Démarrer
+    </button>
+    <button id="btn-stop" class="btn-danger hidden">
+      <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>Arrêter
+    </button>
+    <button id="btn-reset" disabled title="Effacer le dernier stack affiché">Reset</button>
+    <button id="btn-save-png" disabled title="Image affichée (étirement et accentuation compris)">PNG</button>
+    <button id="btn-save-fits" disabled title="Stack brut, 32 bits flottants">FITS</button>
+  </div>
 </header>
 
-<main>
-  <div id="gpu-warn" class="gpu-warn hidden">
-    WebGPU indisponible — calculs sur le processeur (plus lent).<br>
-    <span id="gpu-reason"></span>
-  </div>
+<div class="workspace">
 
-  <section class="preview-box" id="preview-box">
-    <canvas id="stack-canvas"></canvas>
-    <span id="preview-placeholder" style="position:absolute;color:#555;font-size:0.85rem;">En attente de frames…</span>
-    <button id="btn-fullscreen" class="overlay-btn" title="Plein écran">⛶</button>
+  <!-- ── Acquisition ─────────────────────────────────────────────────── -->
+  <aside class="panel panel-left" aria-label="Acquisition">
+    <details class="section" open>
+      <summary>Caméra</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="gain-input">Gain <span class="hint">1 – 64</span></label>
+          <input type="number" id="gain-input" min="1" max="64" step="0.5" value="8">
+        </div>
+        <div class="field">
+          <label for="expo-input">Exposition <span class="hint">ms</span></label>
+          <input type="number" id="expo-input" min="0.1" max="10000" step="0.1" value="100">
+        </div>
+        <div class="field check">
+          <label for="sync-camera">Appliquer à la caméra</label>
+          <input type="checkbox" id="sync-camera" checked>
+        </div>
+        <div class="field">
+          <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
+          <select id="mode-select"><option value="">—</option></select>
+        </div>
+        <div class="field">
+          <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">ROI</label>
+          <select id="roi-select"><option value="full" selected>Plein champ</option></select>
+        </div>
+        <div class="group-title">Exposition</div>
+        <div id="expo-stats" class="expo-stats" title="Sur les 50 dernières images analysées. En RAW : niveau du capteur — au-delà de ~90 % les zones claires risquent l'écrêtement, qui est définitif ; viser 60–75 %. En JPEG/PNG : sortie de l'ISP (courbe gamma), pas le capteur."></div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Flux vers le navigateur</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="format-select">Format</label>
+          <select id="format-select">
+            <option value="raw" selected>RAW (Bayer, précis)</option>
+            <option value="jpeg">JPEG (ISP, léger)</option>
+            <option value="png">PNG (ISP, sans perte)</option>
+          </select>
+        </div>
+        <div class="field" id="bitdepth-row">
+          <label for="bitdepth-select">Profondeur</label>
+          <select id="bitdepth-select">
+            <option value="16" selected>16 bits (qualité)</option>
+            <option value="8">8 bits (débit ×2)</option>
+          </select>
+        </div>
+        <div class="field" id="compression-row">
+          <label for="compression-select">Compression</label>
+          <select id="compression-select">
+            <option value="none" selected>Aucune</option>
+            <option value="zstd">zstd (sans perte)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="preselect-select" title="Le Pi mesure la netteté de chaque image et n'envoie que les meilleures : la liaison (Wi-Fi surtout) ne transporte plus les images rejetées, le capteur peut tourner plus vite qu'elle. Utile quand la liaison limite le débit ; une image écartée par le Pi est perdue.">Présélection Pi</label>
+          <select id="preselect-select">
+            <option value="0" selected>Désactivée</option>
+            <option value="0.5">50 % envoyées</option>
+            <option value="0.25">25 % envoyées</option>
+            <option value="0.1">10 % envoyées</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary>Source</summary>
+      <div class="section-body">
+        <div class="field wide">
+          <label for="ser-file" title="Rejoue un fichier SER ou une vidéo MP4/MOV (H.264) locale à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Fichier SER / MP4 <span class="hint">à la place de la caméra</span></label>
+          <div style="display:flex;gap:6px;align-items:center;min-width:0;">
+            <input type="file" id="ser-file" accept=".ser,.mp4,.mov,.m4v">
+            <button id="ser-clear" class="hidden" title="Revenir à la caméra" aria-label="Revenir à la caméra">✕</button>
+          </div>
+        </div>
+        <div id="mp4-row" class="field hidden">
+          <label for="mp4-scale" title="Une vidéo 4K est trop lourde pour l'empilement : réduction (moyenne des pixels, moins de bruit) puis recadrage centré">Vidéo</label>
+          <div style="display:grid;gap:6px;">
+            <select id="mp4-scale" title="Réduction de la résolution"></select>
+            <select id="mp4-crop" title="Recadrage centré, après réduction"></select>
+          </div>
+        </div>
+        <div id="mp4-info" class="note hidden"></div>
+        <p class="note">Un fichier est lu dans le navigateur : rien n'est envoyé au Pi.</p>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ── Image ───────────────────────────────────────────────────────── -->
+  <section class="view" aria-label="Aperçu du stack">
+    <div class="viewport" id="preview-box">
+      <canvas id="stack-canvas"></canvas>
+      <span id="preview-placeholder" class="placeholder">En attente d'images…</span>
+      <div class="view-banner">
+        <div id="gpu-warn" class="warn-box hidden">
+          WebGPU indisponible — calculs sur le processeur (plus lent).<br>
+          <span id="gpu-reason"></span>
+        </div>
+      </div>
+      <div class="view-tools">
+        <button id="btn-zoom" aria-pressed="false" title="Taille réelle (1 pixel = 1 pixel) ou ajustée à la fenêtre">1:1</button>
+        <button id="btn-fullscreen" aria-label="Plein écran" title="Plein écran">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="readout">
+      <pre id="stats" class="stats">—</pre>
+    </div>
   </section>
 
-  <!-- Camera controls -->
-  <section class="controls">
-    <h3 class="section-title">Paramètres caméra</h3>
-    <div class="control-row control-row--inline">
-      <label for="gain-input">Gain <span class="input-hint">(1 – 64)</span></label>
-      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" value="8">
+  <!-- ── Empilement et rendu ─────────────────────────────────────────── -->
+  <aside class="panel panel-right" aria-label="Empilement et rendu">
+    <div class="tabs" role="tablist">
+      <button role="tab" class="tab-capture" data-tab="capture" aria-selected="false">Capture</button>
+      <button role="tab" data-tab="stack" aria-selected="true">Empilement</button>
+      <button role="tab" data-tab="render" aria-selected="false">Rendu</button>
     </div>
-    <div class="control-row control-row--inline">
-      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 10000)</span></label>
-      <input type="number" id="expo-input" class="value-input" min="0.1" max="10000" step="0.1" value="100">
-    </div>
-    <div class="control-row control-row--inline">
-      <label for="sync-camera">Appliquer à la caméra</label>
-      <input type="checkbox" id="sync-camera" checked style="width:auto;">
-    </div>
-  </section>
+    <div class="tab-panels">
 
-  <!-- Stack controls -->
-  <section class="stack-section">
-    <h3 class="section-title">Lucky Stack</h3>
+      <div class="tab-panel" data-panel="stack">
+        <div class="group-title">Cible</div>
+        <div class="field">
+          <label for="target-mode" title="Planète : le disque entier est dans le champ, chaque image est recentrée sur son barycentre. Surface : Lune ou Soleil en gros plan, disque partiel — la zone éclairée touche les bords, le décalage est mesuré par corrélation de phase avec l'image de référence. Choix gardé par le navigateur.">Cible</label>
+          <select id="target-mode">
+            <option value="disc" selected>Planète (disque entier)</option>
+            <option value="surface">Surface (Lune, Soleil)</option>
+          </select>
+        </div>
 
-    <div class="control-row control-row--inline">
-      <label for="format-select">Format</label>
-      <select id="format-select">
-        <option value="raw" selected>RAW (Bayer, précis)</option>
-        <option value="jpeg">JPEG (ISP, léger)</option>
-        <option value="png">PNG (ISP, sans perte)</option>
-      </select>
-    </div>
+        <div class="group-title">Sélection</div>
+        <div class="field">
+          <label for="selection-select" title="Fenêtre glissante : chaque image est comparée aux 50 dernières, une image empilée le reste. Pool élite : le stack contient toujours les N images les plus nettes de toute la session ; une meilleure remplace la pire, retirée exactement du stack.">Mode</label>
+          <select id="selection-select">
+            <option value="window" selected>Fenêtre glissante</option>
+            <option value="elite">Pool élite</option>
+          </select>
+        </div>
+        <div class="slider" id="quality-row">
+          <label for="quality-slider">Meilleures <span class="hint">des 50 dernières</span></label>
+          <input type="range" id="quality-slider" min="1" max="50" step="1" value="10">
+          <span class="range-val" id="quality-val">10 %</span>
+        </div>
+        <div class="slider hidden" id="pool-row">
+          <label for="pool-size">Taille du pool <span class="hint">meilleures de la session</span></label>
+          <input type="range" id="pool-size" min="10" max="1000" step="10" value="200">
+          <span class="range-val" id="pool-size-val">200</span>
+        </div>
+        <div class="note hidden" id="pool-mem"></div>
 
-    <div class="control-row control-row--inline" id="bitdepth-row">
-      <label for="bitdepth-select">Profondeur</label>
-      <select id="bitdepth-select">
-        <option value="16" selected>16-bit (qualité)</option>
-        <option value="8">8-bit (débit ×2)</option>
-      </select>
-    </div>
+        <div class="group-title">Alignement</div>
+        <div class="field">
+          <label for="align-mode">Points d'alignement</label>
+          <select id="align-mode">
+            <option value="none">Désactivés</option>
+            <option value="on" selected>Activés</option>
+          </select>
+        </div>
+        <div class="slider" id="align-radius-row">
+          <label for="align-radius" title="Chaque image est d'abord recentrée (barycentre de la planète, ou corrélation de phase en mode Surface : la dérive du suivi est rattrapée quelle que soit son amplitude) ; ce rayon ne couvre que l'écart restant : turbulence et imprécision du barycentre. L'augmenter ralentit l'alignement.">Rayon</label>
+          <input type="range" id="align-radius" min="8" max="256" step="8" value="16">
+          <span class="range-val" id="align-radius-val">16 px</span>
+        </div>
+      </div>
 
-    <div class="control-row control-row--inline" id="compression-row">
-      <label for="compression-select">Compression</label>
-      <select id="compression-select">
-        <option value="none" selected>Aucune</option>
-        <option value="zstd">zstd (sans perte)</option>
-      </select>
-    </div>
+      <div class="tab-panel" data-panel="render" hidden>
+        <div class="group-title">Étirement</div>
+        <div class="field check">
+          <label for="awb-toggle">Balance des blancs auto <span class="hint">sur l'image empilée</span></label>
+          <input type="checkbox" id="awb-toggle" checked>
+        </div>
+        <div class="slider">
+          <label for="stretch-lo">Fond de ciel <span class="hint">percentile noir</span></label>
+          <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+          <span class="range-val" id="stretch-lo-val">0.1 %</span>
+        </div>
+        <div class="slider">
+          <label for="stretch-hi" title="Percentile des pixels de la planète (et non de toute l'image) qui devient le blanc : 100 % = rien n'est écrêté à l'affichage.">Point blanc <span class="hint">percentile du disque</span></label>
+          <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
+          <span class="range-val" id="stretch-hi-val">99.9 %</span>
+        </div>
+        <div class="slider">
+          <label for="stretch-gamma" title="Appliqué après l'étirement. Au-dessus de 1, les tons moyens s'assombrissent : les bandes et les détails d'une planète claire ressortent (l'ISP du Pi fait l'inverse, gamma ≈ 0,45). 1 = linéaire.">Gamma <span class="hint">&gt; 1 : moins clair</span></label>
+          <input type="range" id="stretch-gamma" min="0.5" max="3" step="0.05" value="1">
+          <span class="range-val" id="stretch-gamma-val">1.00</span>
+        </div>
+        <div class="slider">
+          <label for="stretch-beta">Arcsinh β <span class="hint">0 = linéaire</span></label>
+          <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+          <span class="range-val" id="stretch-beta-val">0</span>
+        </div>
 
-    <div class="control-row control-row--inline">
-      <label for="preselect-select" title="Le Pi mesure la netteté de chaque image et n'envoie que les meilleures : la liaison (Wi-Fi surtout) ne transporte plus les images rejetées, le capteur peut tourner plus vite qu'elle. Utile quand la liaison limite le débit ; une image écartée par le Pi est perdue.">Présélection Pi</label>
-      <select id="preselect-select">
-        <option value="0" selected>Désactivée</option>
-        <option value="0.5">50 % envoyées</option>
-        <option value="0.25">25 % envoyées</option>
-        <option value="0.1">10 % envoyées</option>
-      </select>
-    </div>
+        <div class="group-title">Accentuation</div>
+        <div class="field check">
+          <label for="post-live" title="Applique ondelettes, débruitage et CLAHE à chaque aperçu pendant l'empilement (calcul sur le processeur, ~0,1–0,3 s par aperçu : aperçu un peu moins fluide)">En direct <span class="hint">sinon à la fin du stack</span></label>
+          <input type="checkbox" id="post-live">
+        </div>
+        <div class="slider">
+          <label for="wav-1">Ondelettes 1 <span class="hint">détail fin</span></label>
+          <input type="range" id="wav-1" min="0" max="10" step="0.1" value="0">
+          <span class="range-val" id="wav-1-val">0</span>
+        </div>
+        <div class="slider">
+          <label for="wav-2">Ondelettes 2 <span class="hint">moyen</span></label>
+          <input type="range" id="wav-2" min="0" max="10" step="0.1" value="0">
+          <span class="range-val" id="wav-2-val">0</span>
+        </div>
+        <div class="slider">
+          <label for="wav-3">Ondelettes 3 <span class="hint">large</span></label>
+          <input type="range" id="wav-3" min="0" max="10" step="0.1" value="0">
+          <span class="range-val" id="wav-3-val">0</span>
+        </div>
+        <div class="slider">
+          <label for="wav-4">Ondelettes 4 <span class="hint">très large</span></label>
+          <input type="range" id="wav-4" min="0" max="10" step="0.1" value="0">
+          <span class="range-val" id="wav-4-val">0</span>
+        </div>
+        <div class="slider">
+          <label for="wav-denoise">Débruitage <span class="hint">couche 1, × bruit</span></label>
+          <input type="range" id="wav-denoise" min="0" max="3" step="0.1" value="0">
+          <span class="range-val" id="wav-denoise-val">0</span>
+        </div>
 
-    <div class="control-row control-row--inline">
-      <label for="mode-select" title="Modes de lecture du capteur branché (dimensions réelles livrées)">Mode capteur</label>
-      <select id="mode-select"><option value="">—</option></select>
-    </div>
+        <div class="group-title">Contraste et couleur</div>
+        <div class="slider">
+          <label for="contrast">Contraste <span class="hint">courbe en S</span></label>
+          <input type="range" id="contrast" min="0" max="100" step="1" value="0">
+          <span class="range-val" id="contrast-val">0 %</span>
+        </div>
+        <div class="slider">
+          <label for="clahe">CLAHE <span class="hint">contraste local</span></label>
+          <input type="range" id="clahe" min="0" max="100" step="1" value="0">
+          <span class="range-val" id="clahe-val">0 %</span>
+        </div>
+        <div class="slider">
+          <label for="saturation">Saturation</label>
+          <input type="range" id="saturation" min="0" max="300" step="5" value="100">
+          <span class="range-val" id="saturation-val">100 %</span>
+        </div>
+        <p class="note">Ondelettes et CLAHE agissent sur l'aperçu et le PNG ; le FITS reste brut.</p>
+      </div>
 
-    <div class="control-row control-row--inline">
-      <label for="roi-select" title="Recadrage centré dans le mode capteur choisi">Résolution ROI</label>
-      <select id="roi-select">
-        <option value="full" selected>Plein champ</option>
-      </select>
     </div>
-
-    <div class="control-row control-row--inline">
-      <label for="selection-select" title="Fenêtre glissante : chaque image est comparée aux 50 dernières, une image empilée le reste. Pool élite : le stack contient toujours les N images les plus nettes de toute la session ; une meilleure remplace la pire, retirée exactement du stack.">Sélection</label>
-      <select id="selection-select">
-        <option value="window" selected>Fenêtre glissante</option>
-        <option value="elite">Pool élite</option>
-      </select>
-    </div>
-
-    <div class="range-row" id="quality-row">
-      <label for="quality-slider">Meilleures frames <span class="input-hint">(des 50 dernières)</span></label>
-      <input type="range" id="quality-slider" min="1" max="50" step="1" value="10">
-      <span class="range-val" id="quality-val">10 %</span>
-    </div>
-
-    <div class="range-row hidden" id="pool-row">
-      <label for="pool-size">Taille du pool <span class="input-hint">(meilleures images de la session)</span></label>
-      <input type="range" id="pool-size" min="10" max="1000" step="10" value="200">
-      <span class="range-val" id="pool-size-val">200</span>
-    </div>
-    <div class="input-hint hidden" id="pool-mem" style="margin:-4px 0 6px;"></div>
-
-    <div class="control-row control-row--inline">
-      <label for="align-mode">Alignement</label>
-      <select id="align-mode">
-        <option value="none">OFF</option>
-        <option value="on" selected>ON</option>
-      </select>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="target-mode" title="Planète : le disque entier est dans le champ, chaque image est recentrée sur son barycentre. Surface : Lune ou Soleil en gros plan, disque partiel — la zone éclairée touche les bords, le décalage est mesuré par corrélation de phase avec l'image de référence. Choix gardé par le navigateur.">Cible</label>
-      <select id="target-mode">
-        <option value="disc" selected>Planète (disque entier)</option>
-        <option value="surface">Surface (Lune, Soleil, disque partiel)</option>
-      </select>
-    </div>
-
-    <div class="range-row" id="align-radius-row">
-      <label for="align-radius" title="Chaque image est d'abord recentrée (barycentre de la planète, ou corrélation de phase en mode Surface : la dérive du suivi est rattrapée quelle que soit son amplitude) ; ce rayon ne couvre que l'écart restant : turbulence et imprécision du barycentre. L'augmenter ralentit l'alignement.">Rayon recherche</label>
-      <input type="range" id="align-radius" min="8" max="256" step="8" value="16">
-      <span class="range-val" id="align-radius-val">16 px</span>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="awb-toggle">Balance des blancs auto <span class="input-hint">(sur l'image stackée)</span></label>
-      <input type="checkbox" id="awb-toggle" checked style="width:auto;">
-    </div>
-
-    <div class="range-row">
-      <label for="stretch-lo">Fond de ciel <span class="input-hint">(percentile noir)</span></label>
-      <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
-      <span class="range-val" id="stretch-lo-val">0.1 %</span>
-    </div>
-    <div class="range-row">
-      <label for="stretch-beta">Arcsinh β <span class="input-hint">(0 = linéaire)</span></label>
-      <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
-      <span class="range-val" id="stretch-beta-val">0</span>
-    </div>
-    <div class="range-row">
-      <label for="stretch-hi" title="Percentile des pixels de la planète (et non de toute l'image) qui devient le blanc : 100 % = rien n'est écrêté à l'affichage.">Point blanc <span class="input-hint">(percentile du disque)</span></label>
-      <input type="range" id="stretch-hi" min="90" max="100" step="0.1" value="99.9">
-      <span class="range-val" id="stretch-hi-val">99.9 %</span>
-    </div>
-    <div class="range-row">
-      <label for="stretch-gamma" title="Appliqué après l'étirement. Au-dessus de 1, les tons moyens s'assombrissent : les bandes et les détails d'une planète claire ressortent (l'ISP du Pi fait l'inverse, gamma ≈ 0,45). 1 = linéaire.">Gamma <span class="input-hint">(&gt; 1 : planète moins claire)</span></label>
-      <input type="range" id="stretch-gamma" min="0.5" max="3" step="0.05" value="1">
-      <span class="range-val" id="stretch-gamma-val">1.00</span>
-    </div>
-
-    <div class="input-hint" style="margin:10px 0 4px;">Accentuation — ondelettes et CLAHE appliqués à la fin du stack (SER terminé ou ■ Arrêter), ou en direct si coché ; aperçu et PNG, le FITS reste brut</div>
-    <div class="control-row control-row--inline">
-      <label for="post-live" title="Applique ondelettes, débruitage et CLAHE à chaque aperçu pendant l'empilement (calcul sur le processeur, ~0,1–0,3 s par aperçu : aperçu un peu moins fluide)">Accentuation en direct</label>
-      <input type="checkbox" id="post-live" style="width:auto;">
-    </div>
-
-    <div class="range-row">
-      <label for="wav-1">Ondelettes 1 <span class="input-hint">(détail fin)</span></label>
-      <input type="range" id="wav-1" min="0" max="10" step="0.1" value="0">
-      <span class="range-val" id="wav-1-val">0</span>
-    </div>
-
-    <div class="range-row">
-      <label for="wav-2">Ondelettes 2 <span class="input-hint">(moyen)</span></label>
-      <input type="range" id="wav-2" min="0" max="10" step="0.1" value="0">
-      <span class="range-val" id="wav-2-val">0</span>
-    </div>
-
-    <div class="range-row">
-      <label for="wav-3">Ondelettes 3 <span class="input-hint">(large)</span></label>
-      <input type="range" id="wav-3" min="0" max="10" step="0.1" value="0">
-      <span class="range-val" id="wav-3-val">0</span>
-    </div>
-
-    <div class="range-row">
-      <label for="wav-4">Ondelettes 4 <span class="input-hint">(très large)</span></label>
-      <input type="range" id="wav-4" min="0" max="10" step="0.1" value="0">
-      <span class="range-val" id="wav-4-val">0</span>
-    </div>
-
-    <div class="range-row">
-      <label for="wav-denoise">Débruitage <span class="input-hint">(couche 1, × bruit)</span></label>
-      <input type="range" id="wav-denoise" min="0" max="3" step="0.1" value="0">
-      <span class="range-val" id="wav-denoise-val">0</span>
-    </div>
-
-    <div class="range-row">
-      <label for="contrast">Contraste <span class="input-hint">(courbe en S)</span></label>
-      <input type="range" id="contrast" min="0" max="100" step="1" value="0">
-      <span class="range-val" id="contrast-val">0 %</span>
-    </div>
-
-    <div class="range-row">
-      <label for="clahe">CLAHE <span class="input-hint">(contraste local)</span></label>
-      <input type="range" id="clahe" min="0" max="100" step="1" value="0">
-      <span class="range-val" id="clahe-val">0 %</span>
-    </div>
-
-    <div class="range-row">
-      <label for="saturation">Saturation <span class="input-hint">(couleurs, en direct)</span></label>
-      <input type="range" id="saturation" min="0" max="300" step="5" value="100">
-      <span class="range-val" id="saturation-val">100 %</span>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="ser-file" title="Rejoue un fichier SER ou une vidéo MP4/MOV (H.264) locale à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Fichier SER / MP4</label>
-      <input type="file" id="ser-file" accept=".ser,.mp4,.mov,.m4v">
-      <button id="ser-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
-    </div>
-    <div id="mp4-row" class="control-row control-row--inline hidden">
-      <label for="mp4-scale" title="Une vidéo 4K est trop lourde pour l'empilement : réduction (moyenne des pixels, moins de bruit) puis recadrage centré">Vidéo</label>
-      <select id="mp4-scale" title="Réduction de la résolution"></select>
-      <select id="mp4-crop" title="Recadrage centré, après réduction"></select>
-    </div>
-    <div id="mp4-info" class="input-hint hidden" style="margin:-2px 0 6px;"></div>
-
-    <div class="button-row">
-      <button id="btn-start" class="btn-green">▶ Démarrer</button>
-      <button id="btn-stop" class="hidden">■ Arrêter</button>
-      <button id="btn-reset" disabled>↺ Reset</button>
-    </div>
-
-    <div class="button-row">
-      <button id="btn-save-png" disabled>⬇ PNG</button>
-      <button id="btn-save-fits" disabled>⬇ FITS</button>
-    </div>
-
-    <div id="stats" class="stats">—</div>
-    <div id="expo-stats" class="stats" style="margin-top:4px;" title="Sur les 50 dernières images analysées. En RAW : niveau du capteur — au-delà de ~90 % les zones claires risquent l'écrêtement, qui est définitif ; viser 60–75 %. En JPEG/PNG : sortie de l'ISP (courbe gamma), pas le capteur."></div>
-  </section>
-</main>
+  </aside>
+</div>
 
 <script type="module">
 import { StreamingStacker } from './stacker.js';
+import { initShell } from './ui_shell.js';
 import { SerFileSource, readSerHeader } from './ser_file_source.js';
 import { Mp4FileSource, readMp4Header, mp4OutputSize } from './mp4_file_source.js';
 import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
@@ -837,16 +858,7 @@ function _resetUI() {
     btnReset.disabled = false;
 }
 
-// Plein écran
-const btnFs = document.getElementById('btn-fullscreen');
-btnFs.addEventListener('click', () => {
-    const box = document.getElementById('preview-box');
-    if (document.fullscreenElement) document.exitFullscreen();
-    else box.requestFullscreen().catch(e => console.warn('Fullscreen:', e));
-});
-document.addEventListener('fullscreenchange', () => {
-    btnFs.textContent = document.fullscreenElement ? '⊡' : '⛶';
-});
+initShell({ tabsKey: 'lucky.tab', defaultTab: 'stack' });
 </script>
 </body>
 </html>

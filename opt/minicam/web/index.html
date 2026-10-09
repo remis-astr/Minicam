@@ -2,275 +2,290 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>MiniCam</title>
-<link rel="stylesheet" href="/static/style.css">
+<script>
+try { if (localStorage.getItem('minicam.theme') === 'night') document.documentElement.dataset.theme = 'night'; } catch {}
+</script>
+<link rel="stylesheet" href="/static/ui.css">
 </head>
-<body>
-<header>
-  <h1>MiniCam</h1>
+<body class="app" data-tab="timelapse">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="night-red" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="0.30 0.59 0.11 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+<header class="topbar">
+  <a class="brand" href="/">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h3M17 12h3M12 4v3M12 17v3"/></svg>
+    MiniCam
+  </a>
+  <nav class="pages" aria-label="Pages">
+    <a href="/" aria-current="page">Caméra</a>
+    <a href="/static/lucky_stack.html">Lucky Stack</a>
+    <a href="/static/live_stack.html">Live Stack</a>
+    <a href="/static/guidage.html">Guidage</a>
+    <a href="/static/photos_gallery.html">Galerie</a>
+  </nav>
   <span id="ws-status" class="badge disconnected">Déconnecté</span>
+  <div class="spacer"></div>
+  <button id="btn-theme" class="btn-ghost" aria-pressed="false" title="Mode nuit : tout en rouge sombre, pour garder la vision nocturne">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+    <span>Nuit</span>
+  </button>
+  <div class="actions">
+    <a class="btn btn-primary" href="/capture.png" download title="Image ISP, enregistrée dans la galerie photos">Photo PNG</a>
+    <a class="btn" href="/capture.fits" download title="Image RAW du capteur, enregistrée dans la galerie photos">RAW FITS</a>
+    <button id="btn-reconnect">Reconnecter</button>
+  </div>
 </header>
 
-<main>
-  <div id="camera-error-banner" class="camera-error-banner hidden"></div>
+<div class="workspace">
 
-  <section class="preview-box" id="preview-box">
-    <canvas id="preview-canvas"></canvas>
-    <canvas id="hist-canvas" class="hist-overlay hidden"></canvas>
-    <canvas id="focus-reticle-canvas" class="hist-overlay hidden"></canvas>
-    <div id="focus-panel" class="focus-panel hidden">
-      <canvas id="focus-zoom-canvas" width="160" height="160"></canvas>
-      <div class="focus-readout">
-        <div class="focus-score-row">
-          <span id="focus-score" class="focus-score">—</span>
-          <span id="focus-peak" class="focus-peak">pic —</span>
+  <!-- ── Réglages caméra ─────────────────────────────────────────────── -->
+  <aside class="panel panel-left" aria-label="Réglages caméra">
+    <details class="section" open>
+      <summary>Exposition</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="gain-input">Gain <span class="hint" id="gain-hint">(1 – 64)</span></label>
+          <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" disabled>
         </div>
-        <div class="focus-bar"><div id="focus-bar-fill" class="focus-bar-fill"></div></div>
-        <button id="btn-focus-reset" class="btn-small">Reset pic</button>
+        <div class="field">
+          <label for="expo-input">Exposition <span class="hint">ms</span></label>
+          <input type="number" id="expo-input" class="value-input" min="0.1" max="120000" step="0.1" disabled>
+        </div>
+        <div class="field">
+          <label for="res-select">Mode</label>
+          <select id="res-select" disabled></select>
+        </div>
       </div>
-      <div class="focus-hint">Cliquez sur l'image pour cibler une étoile</div>
-    </div>
-    <button id="btn-focus" class="overlay-btn" title="Aide à la mise au point">🎯</button>
-    <button id="btn-histogram" class="overlay-btn" title="Histogramme">▦</button>
-    <button id="btn-fullscreen" class="overlay-btn fullscreen-btn" title="Plein écran">⛶</button>
-  </section>
+    </details>
 
-  <section class="controls">
-    <div class="control-row control-row--inline">
-      <label for="gain-input">Gain <span class="input-hint" id="gain-hint">(1 – 64)</span></label>
-      <input type="number" id="gain-input" class="value-input" min="1" max="64" step="0.5" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="expo-input">Exposition <span class="input-hint">(ms, 0.1 – 120000)</span></label>
-      <input type="number" id="expo-input" class="value-input" min="0.1" max="120000" step="0.1" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="wb-red-input">Bleu <span class="input-hint">(0.1 – 8)</span></label>
-      <input type="number" id="wb-red-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="wb-blue-input">Rouge <span class="input-hint">(0.1 – 8)</span></label>
-      <input type="number" id="wb-blue-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="contrast-input">Contraste <span class="input-hint">(0 – 32)</span></label>
-      <input type="number" id="contrast-input" class="value-input" min="0" max="32" step="0.1" value="1.0" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="sharpness-input">Netteté <span class="input-hint">(0 – 16)</span></label>
-      <input type="number" id="sharpness-input" class="value-input" min="0" max="16" step="0.1" value="1.0" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="saturation-input">Saturation <span class="input-hint">(0 – 32)</span></label>
-      <input type="number" id="saturation-input" class="value-input" min="0" max="32" step="0.1" value="1.0" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="brightness-input">Luminosité <span class="input-hint">(-1 – 1)</span></label>
-      <input type="number" id="brightness-input" class="value-input" min="-1" max="1" step="0.05" value="0.0" disabled>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="nr-input">Réduction bruit</label>
-      <select id="nr-input" disabled>
-        <option value="0">Désactivé</option>
-        <option value="1" selected>Rapide</option>
-        <option value="2">Haute qualité</option>
-        <option value="3">Minimal</option>
-      </select>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="res-select">Mode</label>
-      <select id="res-select" disabled></select>
-    </div>
-
-    <div class="button-row">
-      <a class="btn" href="/capture.png" download>Capture PNG</a>
-      <a class="btn btn-raw" href="/capture.fits" download>Capture RAW (FITS)</a>
-      <button id="btn-reconnect">Reconnecter</button>
-    </div>
-
-    <div id="status-bar">—</div>
-  </section>
-
-
-  <section class="timelapse-section">
-    <h3 class="section-title">Timelapse / Allsky</h3>
-
-    <div class="control-row control-row--inline">
-      <label for="tl-mode">Format</label>
-      <select id="tl-mode">
-        <option value="isp_jpeg">ISP JPEG</option>
-        <option value="isp_png">ISP PNG</option>
-        <option value="raw_fits">RAW FITS</option>
-      </select>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="tl-end-time">Heure de fin</label>
-      <input type="time" id="tl-end-time" class="value-input" value="06:00">
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="tl-interval">Intervalle entre images <span class="input-hint">(s, 0 = continu)</span></label>
-      <input type="number" id="tl-interval" class="value-input" min="0" step="1" value="0">
-    </div>
-
-    <div class="control-row">
-      <label class="checkbox-label">
-        <input type="checkbox" id="tl-auto-gain">
-        Gain variable automatique
-      </label>
-    </div>
-    <div id="tl-auto-gain-opts" class="hidden">
-      <div class="control-row control-row--inline">
-        <label for="tl-ag-target">Luminosité cible <span class="input-hint">(0–255)</span></label>
-        <input type="number" id="tl-ag-target" class="value-input" min="10" max="200" step="5" value="80">
+    <details class="section" open>
+      <summary>Image (ISP)</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="wb-red-input">Bleu <span class="hint">0,1 – 8</span></label>
+          <input type="number" id="wb-red-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
+        </div>
+        <div class="field">
+          <label for="wb-blue-input">Rouge <span class="hint">0,1 – 8</span></label>
+          <input type="number" id="wb-blue-input" class="value-input" min="0.1" max="8" step="0.05" disabled>
+        </div>
+        <div class="field">
+          <label for="contrast-input">Contraste <span class="hint">0 – 32</span></label>
+          <input type="number" id="contrast-input" class="value-input" min="0" max="32" step="0.1" value="1.0" disabled>
+        </div>
+        <div class="field">
+          <label for="sharpness-input">Netteté <span class="hint">0 – 16</span></label>
+          <input type="number" id="sharpness-input" class="value-input" min="0" max="16" step="0.1" value="1.0" disabled>
+        </div>
+        <div class="field">
+          <label for="saturation-input">Saturation <span class="hint">0 – 32</span></label>
+          <input type="number" id="saturation-input" class="value-input" min="0" max="32" step="0.1" value="1.0" disabled>
+        </div>
+        <div class="field">
+          <label for="brightness-input">Luminosité <span class="hint">−1 – 1</span></label>
+          <input type="number" id="brightness-input" class="value-input" min="-1" max="1" step="0.05" value="0.0" disabled>
+        </div>
+        <div class="field">
+          <label for="nr-input">Réduction bruit</label>
+          <select id="nr-input" disabled>
+            <option value="0">Désactivée</option>
+            <option value="1" selected>Rapide</option>
+            <option value="2">Haute qualité</option>
+            <option value="3">Minimale</option>
+          </select>
+        </div>
       </div>
-      <div class="control-row control-row--inline">
-        <label for="tl-ag-max">Gain max <span class="input-hint">(1–64)</span></label>
-        <input type="number" id="tl-ag-max" class="value-input" min="1" max="64" step="0.5" value="16">
+    </details>
+  </aside>
+
+  <!-- ── Aperçu ──────────────────────────────────────────────────────── -->
+  <section class="view" aria-label="Aperçu caméra">
+    <div class="viewport fit-stage" id="preview-box">
+      <div class="stage" id="preview-stage">
+        <canvas id="preview-canvas"></canvas>
+        <canvas id="hist-canvas" class="hist-overlay hidden"></canvas>
+        <canvas id="focus-reticle-canvas" class="hist-overlay hidden"></canvas>
+      </div>
+      <div class="view-banner">
+        <div id="camera-error-banner" class="error-banner hidden"></div>
+      </div>
+      <div id="focus-panel" class="focus-panel hidden">
+        <canvas id="focus-zoom-canvas" width="160" height="160"></canvas>
+        <div class="focus-readout">
+          <div class="focus-score-row">
+            <span id="focus-score" class="focus-score">—</span>
+            <span id="focus-peak" class="focus-peak">pic —</span>
+          </div>
+          <div class="focus-bar"><div id="focus-bar-fill" class="focus-bar-fill"></div></div>
+          <button id="btn-focus-reset" class="btn-small">Reset pic</button>
+        </div>
+        <div class="focus-hint">Cliquez sur l'image pour cibler une étoile</div>
+      </div>
+      <div class="view-tools">
+        <button id="btn-focus" title="Aide à la mise au point" aria-label="Aide à la mise au point">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        </button>
+        <button id="btn-histogram" title="Histogramme" aria-label="Histogramme">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20V10M9 20V5M14 20v-8M19 20v-4M3 20h18"/></svg>
+        </button>
+        <button id="btn-fullscreen" aria-label="Plein écran" title="Plein écran (ou double-clic sur l'image)">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
       </div>
     </div>
-
-    <div class="button-row">
-      <button id="btn-tl-start" disabled>&#9654; Demarrer timelapse</button>
-      <button id="btn-tl-stop" class="hidden btn-tl-stop">&#9632; Arreter</button>
-    </div>
-
-    <div id="tl-status" class="tl-status">—</div>
-
-    <div id="tl-preview-box" class="tl-preview-box hidden">
-      <img id="tl-preview-img" class="tl-preview-img" src="" alt="Derniere image timelapse">
+    <div class="readout">
+      <div id="status-bar" class="status-line">—</div>
     </div>
   </section>
 
-  <section class="gallery-section">
-    <div class="gallery-header">
-      <h3 class="section-title">Galerie Timelapse</h3>
-      <div class="gallery-actions">
-        <button id="btn-gallery-refresh" class="btn-small">&#8635; Actualiser</button>
-        <button id="btn-gallery-purge" class="btn-small btn-danger-sm">&#128465; Tout supprimer</button>
-      </div>
+  <!-- ── Timelapse et système ────────────────────────────────────────── -->
+  <aside class="panel panel-right" aria-label="Timelapse et système">
+    <div class="tabs" role="tablist">
+      <button role="tab" class="tab-capture" data-tab="capture" aria-selected="false">Réglages</button>
+      <button role="tab" data-tab="timelapse" aria-selected="true">Timelapse</button>
+      <button role="tab" data-tab="system" aria-selected="false">Système</button>
     </div>
-    <div id="gallery-disk" class="gallery-disk"></div>
-    <div id="gallery-empty" class="gallery-empty hidden">Aucune session timelapse.</div>
-    <div id="gallery-list" class="gallery-list"></div>
-  </section>
+    <div class="tab-panels">
 
-  <section class="gallery-section">
-    <div class="gallery-header">
-      <h3 class="section-title">Galerie Photos</h3>
-    </div>
-    <a class="btn" href="/static/photos_gallery.html" target="_blank">&#128247; Ouvrir la galerie photos</a>
-  </section>
+      <div class="tab-panel" data-panel="timelapse">
+        <div class="group-title">Timelapse / Allsky</div>
+        <div class="field">
+          <label for="tl-mode">Format</label>
+          <select id="tl-mode">
+            <option value="isp_jpeg">ISP JPEG</option>
+            <option value="isp_png">ISP PNG</option>
+            <option value="raw_fits">RAW FITS</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tl-end-time">Heure de fin</label>
+          <input type="time" id="tl-end-time" class="value-input" value="06:00">
+        </div>
+        <div class="field">
+          <label for="tl-interval">Intervalle <span class="hint">s, 0 = continu</span></label>
+          <input type="number" id="tl-interval" class="value-input" min="0" step="1" value="0">
+        </div>
+        <div class="field check">
+          <label for="tl-auto-gain">Gain variable automatique</label>
+          <input type="checkbox" id="tl-auto-gain">
+        </div>
+        <div id="tl-auto-gain-opts" class="hidden" style="display:flex;flex-direction:column;gap:8px;">
+          <div class="field">
+            <label for="tl-ag-target">Luminosité cible <span class="hint">0 – 255</span></label>
+            <input type="number" id="tl-ag-target" class="value-input" min="10" max="200" step="5" value="80">
+          </div>
+          <div class="field">
+            <label for="tl-ag-max">Gain max <span class="hint">1 – 64</span></label>
+            <input type="number" id="tl-ag-max" class="value-input" min="1" max="64" step="0.5" value="16">
+          </div>
+        </div>
+        <div class="button-pair">
+          <button id="btn-tl-start" class="btn-primary" disabled>Démarrer le timelapse</button>
+          <button id="btn-tl-stop" class="btn-danger hidden btn-tl-stop">Arrêter</button>
+        </div>
+        <div id="tl-status" class="tl-status">—</div>
+        <div id="tl-preview-box" class="tl-preview-box hidden">
+          <img id="tl-preview-img" class="tl-preview-img" src="" alt="Dernière image du timelapse">
+        </div>
 
-  <section class="astrohopper-section">
-    <h3 class="section-title">Monture &amp; guidage (M8S)</h3>
-    <p class="indi-info">Pilotage de la monture OnStep, plate solve, alignement et autoguidage, calculés par le M8S relié en USB.</p>
-    <div class="button-row">
-      <a class="btn btn-astro" href="/static/guidage.html">&#9737; Guidage M8S</a>
-    </div>
-  </section>
-
-  <section class="astrohopper-section">
-    <h3 class="section-title">Stacking GPU</h3>
-    <p class="indi-info">Lucky Stack et Live Stack utilisent WebGPU — requiert Chrome 113+ ou Edge 113+. SharedArrayBuffer doit être activé (servi avec COOP/COEP).</p>
-    <div class="button-row">
-      <a class="btn btn-astro" href="/static/lucky_stack.html">&#9733; Lucky Stack</a>
-      <a class="btn btn-astro" href="/static/live_stack.html">&#9733; Live Stack</a>
-    </div>
-  </section>
-
-  <section class="indi-section">
-    <h3 class="section-title">Mode INDI</h3>
-    <p class="indi-info">Active INDI pour piloter la caméra depuis Open Live Stacker ou tout client INDI (port 7624). Le preview HTML est suspendu pendant ce mode.</p>
-    <div id="indi-status" class="indi-status">Mode API actif</div>
-    <div class="button-row">
-      <button id="btn-indi-start">▶ Activer INDI</button>
-      <button id="btn-indi-stop" class="hidden">■ Désactiver INDI</button>
-    </div>
-  </section>
-
-  <section class="wifi-section">
-    <h3 class="section-title">WiFi / Hotspot</h3>
-    <div id="wifi-state" class="wifi-state">—</div>
-    <div id="wifi-ip-row" class="wifi-ip-row hidden">
-      <span id="wifi-ip-bar" class="wifi-ip-bar"></span>
-      <button id="btn-wifi-copy" class="btn-wifi-copy" title="Copier l'adresse">&#10697;</button>
-      <button id="btn-wifi-fixip" class="btn-wifi-fixip" title="Fixer cette IP (connexion toujours sur la même adresse)">Fixer cette IP</button>
-    </div>
-
-    <div class="control-row control-row--inline">
-      <label for="wifi-profile-select">Réseau sauvegardé</label>
-      <select id="wifi-profile-select" class="value-input">
-        <option value="">— Nouveau réseau —</option>
-      </select>
-    </div>
-
-    <div id="wifi-new-fields">
-      <div class="control-row control-row--inline">
-        <label for="wifi-ssid">SSID</label>
-        <input type="text" id="wifi-ssid" class="value-input" placeholder="Nom du réseau"
-               autocomplete="off" autocorrect="off" spellcheck="false">
+        <div class="group-title">Sessions enregistrées</div>
+        <div class="gallery-header">
+          <div id="gallery-disk" class="gallery-disk"></div>
+          <div class="gallery-actions">
+            <button id="btn-gallery-refresh" class="btn-small">Actualiser</button>
+            <button id="btn-gallery-purge" class="btn-small btn-danger-sm">Tout supprimer</button>
+          </div>
+        </div>
+        <div id="gallery-empty" class="gallery-empty hidden">Aucune session timelapse.</div>
+        <div id="gallery-list" class="gallery-list"></div>
       </div>
 
-      <div class="control-row control-row--inline">
-        <label for="wifi-pass">Mot de passe</label>
-        <input type="password" id="wifi-pass" class="value-input" placeholder="">
+      <div class="tab-panel" data-panel="system" hidden>
+        <div class="group-title">WiFi / point d'accès</div>
+        <div id="wifi-state" class="wifi-state">—</div>
+        <div id="wifi-ip-row" class="wifi-ip-row hidden">
+          <span id="wifi-ip-bar" class="wifi-ip-bar"></span>
+          <button id="btn-wifi-copy" class="btn-wifi-copy" title="Copier l'adresse" aria-label="Copier l'adresse">&#10697;</button>
+          <button id="btn-wifi-fixip" class="btn-wifi-fixip" title="Fixer cette IP (connexion toujours sur la même adresse)">Fixer cette IP</button>
+        </div>
+        <div class="field">
+          <label for="wifi-profile-select">Réseau</label>
+          <select id="wifi-profile-select" class="value-input">
+            <option value="">— Nouveau réseau —</option>
+          </select>
+        </div>
+        <div id="wifi-new-fields" style="display:flex;flex-direction:column;gap:8px;">
+          <div class="field">
+            <label for="wifi-ssid">SSID</label>
+            <input type="text" id="wifi-ssid" class="value-input" placeholder="Nom du réseau" autocomplete="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="wifi-pass">Mot de passe</label>
+            <input type="password" id="wifi-pass" class="value-input" placeholder="">
+          </div>
+        </div>
+        <div class="button-pair">
+          <button id="btn-wifi-connect">Connecter</button>
+          <button id="btn-wifi-disconnect">Déconnecter</button>
+        </div>
+
+        <div class="group-title">Mode INDI</div>
+        <p class="note">Pilote la caméra depuis Open Live Stacker ou tout client INDI (port 7624). L'aperçu est suspendu pendant ce mode.</p>
+        <div id="indi-status" class="indi-status">Mode API actif</div>
+        <div class="button-pair">
+          <button id="btn-indi-start">Activer INDI</button>
+          <button id="btn-indi-stop" class="hidden">Désactiver INDI</button>
+        </div>
+
+        <div class="group-title">Éclairage</div>
+        <div class="button-pair">
+          <button id="btn-led-on">LED allumée</button>
+          <button id="btn-led-off">LED éteinte</button>
+        </div>
+        <div id="led-status" class="sys-status"></div>
+
+        <div class="group-title">Capteur</div>
+        <div class="field">
+          <label for="sensor-select">Capteur</label>
+          <select id="sensor-select"></select>
+        </div>
+        <button id="btn-sensor-apply" class="btn-warning">Appliquer (redémarrage)</button>
+        <p class="note">Vérifiez que le bon capteur est physiquement branché avant d'appliquer : un mauvais appariement rend la caméra indisponible jusqu'à correction.</p>
+        <div id="sensor-status" class="sys-status"></div>
+
+        <div class="group-title">Alimentation</div>
+        <div class="button-pair">
+          <button id="btn-reboot">Redémarrer</button>
+          <button id="btn-shutdown" class="btn-danger">Éteindre</button>
+        </div>
+        <div id="sys-status" class="sys-status"></div>
       </div>
-    </div>
 
-    <div class="button-row">
-      <button id="btn-wifi-connect">&#8644; Connecter</button>
-      <button id="btn-wifi-disconnect">&#10006; Déconnecter</button>
     </div>
-  </section>
-
-  <section class="sys-section">
-    <h3 class="section-title">Système</h3>
-    <div class="button-row">
-      <button id="btn-led-on">&#9728; LED on</button>
-      <button id="btn-led-off">&#9788; LED off</button>
-    </div>
-    <div id="led-status" class="sys-status"></div>
-    <div class="button-row">
-      <button id="btn-reboot" class="btn-warning">↺ Redémarrer</button>
-      <button id="btn-shutdown" class="btn-danger">⏻ Éteindre</button>
-    </div>
-    <div id="sys-status" class="sys-status"></div>
-
-    <div class="control-row control-row--inline">
-      <label for="sensor-select">Capteur</label>
-      <select id="sensor-select"></select>
-      <button id="btn-sensor-apply" class="btn-warning">Appliquer (redémarrage)</button>
-    </div>
-    <p class="indi-info">Assure-toi d'avoir physiquement branché le bon capteur avant d'appliquer — un mauvais appariement rend la caméra indisponible jusqu'à correction.</p>
-    <div id="sensor-status" class="sys-status"></div>
-  </section>
-</main>
+  </aside>
+</div>
 
 <div id="viewer-overlay" class="viewer-overlay hidden">
   <div class="viewer-topbar">
     <span id="viewer-title" class="viewer-title"></span>
     <span id="viewer-counter" class="viewer-counter"></span>
-    <button id="btn-viewer-close" class="viewer-close-btn">&#10005;</button>
+    <button id="btn-viewer-close" class="viewer-close-btn" aria-label="Fermer">&#10005;</button>
   </div>
   <div class="viewer-imgwrap">
-    <button id="btn-viewer-prev" class="viewer-nav viewer-nav-prev">&#10094;</button>
+    <button id="btn-viewer-prev" class="viewer-nav viewer-nav-prev" aria-label="Précédente">&#10094;</button>
     <img id="viewer-img" class="viewer-img" src="" alt="">
-    <button id="btn-viewer-next" class="viewer-nav viewer-nav-next">&#10095;</button>
+    <button id="btn-viewer-next" class="viewer-nav viewer-nav-next" aria-label="Suivante">&#10095;</button>
   </div>
 </div>
 
 <script src="/static/app.js"></script>
+<script type="module">
+import { initShell } from '/static/ui_shell.js';
+initShell({ tabsKey: 'camera.tab', defaultTab: 'timelapse', viewport: false });
+</script>
 </body>
 </html>
