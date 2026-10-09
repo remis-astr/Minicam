@@ -78,8 +78,13 @@ Le dépôt suit l'arborescence du Pi :
   défaut, 50 / 25 / 10 % envoyées) : le Pi mesure la netteté de chaque
   image et n'envoie que les meilleures, la liaison (Wi-Fi surtout) ne
   transporte plus les images que le navigateur aurait rejetées. Score =
-  variance du Laplacien sur un des deux plans verts du ROI, lu en 8 bits de
-  poids fort directement dans le RAW empaqueté (~1 ms en 640×480) ; même
+  écart-type du Laplacien après `pyrDown` (lissage + réduction 2×) sur le
+  disque (> 30 % du max, tout le plan à défaut), divisé par sa luminosité
+  moyenne, calculé sur un des deux plans verts du ROI lu en 8 bits de
+  poids fort directement dans le RAW empaqueté (~1 ms pour la lecture,
+  ~1,8 ms pour le score en 640×480). Le Laplacien du plan brut mesurait
+  surtout le bruit : en RAW Bayer, il ne gardait pas plus les meilleures
+  images que le hasard ; même
   règle que la sélection du navigateur (percentile des 50 derniers scores,
   5 premières images toujours acceptées). En RAW, chaque image produite
   par la caméra passe par le `post_callback` de picamera2, et 3 threads
