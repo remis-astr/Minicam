@@ -250,10 +250,16 @@
     </div>
 
     <div class="control-row control-row--inline">
-      <label for="ser-file" title="Rejoue un fichier SER local à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Test SER</label>
-      <input type="file" id="ser-file" accept=".ser">
+      <label for="ser-file" title="Rejoue un fichier SER ou une vidéo MP4/MOV (H.264) locale à la place de la caméra (lu dans le navigateur, rien n'est envoyé au Pi)">Fichier SER / MP4</label>
+      <input type="file" id="ser-file" accept=".ser,.mp4,.mov,.m4v">
       <button id="ser-clear" class="hidden" title="Revenir à la caméra" style="flex:0 0 auto;width:auto;padding:2px 10px;">✕</button>
     </div>
+    <div id="mp4-row" class="control-row control-row--inline hidden">
+      <label for="mp4-scale" title="Une vidéo 4K est trop lourde pour l'empilement : réduction (moyenne des pixels, moins de bruit) puis recadrage centré">Vidéo</label>
+      <select id="mp4-scale" title="Réduction de la résolution"></select>
+      <select id="mp4-crop" title="Recadrage centré, après réduction"></select>
+    </div>
+    <div id="mp4-info" class="input-hint hidden" style="margin:-2px 0 6px;"></div>
 
     <div class="button-row">
       <button id="btn-start" class="btn-green">▶ Démarrer</button>
@@ -274,6 +280,7 @@
 <script type="module">
 import { StreamingStacker } from './stacker.js';
 import { SerFileSource, readSerHeader } from './ser_file_source.js';
+import { Mp4FileSource, readMp4Header, mp4OutputSize } from './mp4_file_source.js';
 import { detectGpu, ControlWs, savePng, saveFits, formatDate, wsUrl,
          fillModeSelect, fillRoiSelect, parseRoi, ROI_CHOICES } from './ui_common.js';
 
@@ -347,11 +354,63 @@ const btnSaveFits  = document.getElementById('btn-save-fits');
 const elSerFile    = document.getElementById('ser-file');
 const btnSerClear  = document.getElementById('ser-clear');
 
+const elMp4Row   = document.getElementById('mp4-row');
+const elMp4Scale = document.getElementById('mp4-scale');
+const elMp4Crop  = document.getElementById('mp4-crop');
+const elMp4Info  = document.getElementById('mp4-info');
+const isMp4 = (f) => /\.(mp4|mov|m4v)$/i.test(f?.name ?? '');
+let mp4Header = null;   // en-tête de la vidéo choisie (démultiplexée)
+
+// Réduction et recadrage proposés pour la vidéo : sortie ≤ ~2 Mpx
+function fillMp4Selects(h) {
+    const prevScale = elMp4Scale.value, prevCrop = elMp4Crop.value;
+    elMp4Scale.innerHTML = '';
+    for (const k of [1, 2, 3, 4])
+        elMp4Scale.add(new Option(k === 1 ? `Pleine résolution (${h.width}×${h.height})`
+            : `÷${k} (${Math.floor(h.width / k)}×${Math.floor(h.height / k)})`, String(k)));
+    const auto = [1, 2, 3, 4].find((k) => (h.width / k) * (h.height / k) <= 2.1e6) ?? 4;
+    elMp4Scale.value = [...elMp4Scale.options].some((o) => o.value === prevScale) && mp4Header === h ? prevScale : String(auto);
+    fillMp4Crop(h, prevCrop);
+}
+function fillMp4Crop(h, prev = elMp4Crop.value) {
+    const k = parseInt(elMp4Scale.value);
+    fillRoiSelect(elMp4Crop, Math.floor(h.width / k), Math.floor(h.height / k),
+                  [[1920, 1440], [1600, 1200], [1280, 960], ...ROI_CHOICES.lucky]);
+    if ([...elMp4Crop.options].some((o) => o.value === prev)) elMp4Crop.value = prev;
+}
+function mp4Choice() {
+    return { scale: parseInt(elMp4Scale.value) || 1, crop: parseRoi(elMp4Crop.value) };
+}
+function updateMp4Info() {
+    if (!mp4Header) return;
+    const { scale, crop } = mp4Choice();
+    const o = mp4OutputSize(mp4Header, scale, crop);
+    serInfo = { w: o.width, h: o.height, bpp: 4 };
+    elMp4Info.textContent = `${mp4Header.frames} images, ${mp4Header.fps.toFixed(1)} i/s, ${mp4Header.codec} → empilement en ${o.width}×${o.height}`;
+    updateSelectionUi();
+}
+elMp4Scale.addEventListener('change', () => { fillMp4Crop(mp4Header); updateMp4Info(); });
+elMp4Crop.addEventListener('change', updateMp4Info);
+
 elSerFile.addEventListener('change', async () => {
     // pool élite : une image SER est conservée telle que lue (Bayer 8/16 bits ou RGBA 8 bits)
     serInfo = null;
+    mp4Header = null;
     const f = elSerFile.files[0];
-    if (f) {
+    elMp4Row.classList.toggle('hidden', !isMp4(f));
+    elMp4Info.classList.toggle('hidden', !isMp4(f));
+    elMp4Info.textContent = '';
+    if (f && isMp4(f)) {
+        elMp4Info.textContent = 'Lecture de la vidéo…';
+        try {
+            const h = await readMp4Header(f);
+            fillMp4Selects(h);
+            mp4Header = h;
+            updateMp4Info();
+        } catch (e) {
+            elMp4Info.textContent = 'Vidéo illisible : ' + e.message;
+        }
+    } else if (f) {
         try {
             const h = await readSerHeader(f);
             serInfo = { w: h.width, h: h.height, bpp: h.bayer ? h.bytesPx : 4 };
@@ -364,6 +423,9 @@ btnSerClear.addEventListener('click', () => {
     elSerFile.value = '';
     btnSerClear.classList.add('hidden');
     serInfo = null;
+    mp4Header = null;
+    elMp4Row.classList.add('hidden');
+    elMp4Info.classList.add('hidden');
     updateSelectionUi();
 });
 
@@ -612,6 +674,10 @@ btnStart.addEventListener('click', async () => {
     // Un stack déjà en cours (double clic…) serait orphelin : flux /ws/raw et
     // workers continueraient sans pouvoir être arrêtés.
     if (stacker) { stacker.stop(); stacker = null; }
+    if (isMp4(elSerFile.files[0]) && !mp4Header) {
+        elStats.textContent = elMp4Info.textContent || 'Vidéo illisible';
+        return;
+    }
     btnStart.classList.add('hidden');
     btnStop.classList.remove('hidden');
     btnReset.disabled    = true;
@@ -679,24 +745,27 @@ btnStart.addEventListener('click', async () => {
     });
 
     const serFile = elSerFile.files[0];
-    const source = serFile
-        ? new SerFileSource(serFile, {
-            onProgress: (i, n) => { elStatus.textContent = `SER ${i} / ${n}`; },
-            onEnd: () => {
-                elStatus.className   = 'badge disconnected';
-                elStatus.textContent = 'SER terminé';
-                stacker?.finish().then(updateStats);
-            },
-        })
-        : WS_RAW;
+    const kind = isMp4(serFile) ? 'MP4' : 'SER';
+    const fileOpts = {
+        onProgress: (i, n) => { elStatus.textContent = `${kind} ${i} / ${n}`; },
+        onEnd: () => {
+            elStatus.className   = 'badge disconnected';
+            elStatus.textContent = `${kind} terminé`;
+            stacker?.finish().then(updateStats);
+        },
+    };
+    const source = !serFile ? WS_RAW
+        : kind === 'MP4' ? new Mp4FileSource(serFile, { ...mp4Choice(), ...fileOpts })
+        : new SerFileSource(serFile, fileOpts);
     elSerFile.disabled = true;
+    elMp4Scale.disabled = elMp4Crop.disabled = true;
     try {
         await stacker.start(source);
         elStatus.className   = 'badge connected';
-        elStatus.textContent = serFile ? 'Lecture SER' : 'Flux actif';
+        elStatus.textContent = serFile ? `Lecture ${kind}` : 'Flux actif';
         if (serFile) {
             const h = source.header;
-            console.log(`[SER] ${serFile.name} : ${h.width}×${h.height}, ${h.depth} bits, ColorID ${h.colorId}, ${h.frames} images`);
+            console.log(`[${kind}] ${serFile.name} : ${h.width}×${h.height}, ${h.depth} bits, ${kind === 'MP4' ? h.codec : 'ColorID ' + h.colorId}, ${h.frames} images`);
         }
     } catch (e) {
         elStats.textContent  = 'Erreur connexion : ' + e.message;
@@ -762,6 +831,7 @@ btnSaveFits.addEventListener('click', async () => {
 
 function _resetUI() {
     elSerFile.disabled = false;
+    elMp4Scale.disabled = elMp4Crop.disabled = false;
     btnStart.classList.remove('hidden');
     btnStop.classList.add('hidden');
     btnReset.disabled = false;
