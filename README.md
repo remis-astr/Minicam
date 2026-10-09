@@ -208,8 +208,29 @@ Spécifique à Minicam. Fichiers : `opt/minicam/src/minicam/imu.py`
   Niveau de noir du capteur (`black_level` du Pi) retiré au rendu en RAW,
   avant la balance des blancs ; le stack et le FITS restent bruts. Le Live
   Stack garde l'ancien point blanc.
-- **Test SER** : rejoue un fichier SER local (lu dans le navigateur, rien
-  n'est envoyé au Pi) à la place de la caméra. Mono, Bayer, RGB/BGR, 8/16 bits.
+- **Fichier SER / MP4** : rejoue un fichier local (lu dans le navigateur, rien
+  n'est envoyé au Pi) à la place de la caméra. SER : mono, Bayer, RGB/BGR,
+  8/16 bits. MP4/MOV (H.264) : démultiplexage maison (tables
+  d'échantillons du `moov`) et décodage WebCodecs, matériel si possible ;
+  toutes les images dans l'ordre, aucune sautée ; vidéo tronquée →
+  empilement des images lisibles. Une vidéo 4K est réduite (÷1 à ÷4, par
+  défaut la première ≤ ~2 Mpx) puis recadrée au centre, choix faits au
+  chargement. Mesuré sur une Lune 4032×3024 de 614 images (RX 570) :
+  ÷3 en 2 min 50, ÷2 en 4 min 26, pleine résolution en 11 min 47 (analyse
+  CPU 0,7 s et aperçu 3,6 s par image dominent). Sur cette vidéo, le
+  spectre d'une image garde du signal jusqu'à ~0,3 cycle/px : ÷2 ne perd
+  presque rien, ÷3 coupe une bande que l'empilement aurait pu révéler.
+  WebCodecs exige le HTTPS (port 8443), comme WebGPU.
+- **Déformation locale** : le décalage de chaque pixel est la moyenne des
+  points d'alignement voisins pondérée par une gaussienne qui tombe à zéro
+  au rayon d'influence (4 × patch = 80 px), plus un petit poids « pas de
+  décalage local » : un point isolé (voisins rejetés sur une zone sombre
+  ou peu contrastée) s'estompe vers le recentrage global au lieu de
+  découper un disque de 160 px, d'où les ronds sur la Lune. Index spatial
+  des points (grille de 80 px) : chaque pixel ne parcourt que les 3×3
+  cellules voisines au lieu de tous les points, sinon le coût croît comme
+  le carré de la résolution. Sur deux SER de Jupiter 640×480 (RGB et
+  Bayer), stack à 0,08 et 0,17 % de l'ancien, netteté inchangée.
 - **Traitement** : étirement linéaire par défaut (arcsinh réservé au ciel
   profond), contraste (courbe en S) ; ondelettes à trous (4 couches +
   débruitage) et CLAHE appliqués **à la fin** du stack (SER terminé ou

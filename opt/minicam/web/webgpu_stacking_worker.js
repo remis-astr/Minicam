@@ -310,7 +310,8 @@ self.addEventListener('message', async (e) => {
                 ctx.refBrightness,
                 appliedOffset,
                 ctx.minApQuality,
-                ctx.pixfrac
+                ctx.pixfrac,
+                ctx.alignmentPoints
             );
 
             self.postMessage({ type: 'stack-batch-done', count: frames.length });
