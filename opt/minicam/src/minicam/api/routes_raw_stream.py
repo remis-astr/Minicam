@@ -99,11 +99,26 @@ class Preselector:
             return score >= ranked[idx]
 
 
-def _laplacian_var(plane: np.ndarray) -> float:
-    """Variance du Laplacien : score de netteté (même famille que celui du
-    navigateur), ~2 ms pour un plan 320×240 sur un cœur du Pi Zero 2 W."""
-    lap = cv2.Laplacian(np.asarray(plane, dtype=np.float32), cv2.CV_32F, ksize=3)
-    return float(cv2.meanStdDev(lap)[1][0, 0]) ** 2
+def _sharpness(plane: np.ndarray) -> float:
+    """Score de netteté passe-bande, même principe que celui du navigateur
+    (cpu_analyze_worker.js) : pyrDown (lissage 5×5 + réduction 2×) puis
+    Laplacien 4 voisins, écart-type sur le disque (> 30 % du max) divisé par
+    sa luminosité moyenne. Le Laplacien du plan brut mesurait surtout le
+    bruit pixel : sur des RAW Bayer, il ne gardait pas plus les meilleures
+    images que le hasard (banc sur 5 vidéos de Jupiter, 2026-10-09). ~0,6 ms
+    en 144×144, ~1,8 ms en 320×240 sur un cœur du Pi Zero 2 W.
+    Repli sur tout le plan quand le disque est trop petit ou absent (Lune
+    en surface, champ vide)."""
+    b = cv2.pyrDown(np.asarray(plane, dtype=np.float32))
+    lap = cv2.Laplacian(b, cv2.CV_32F, ksize=1)
+    peak = float(b.max())
+    mask = cv2.compare(b, 0.3 * peak, cv2.CMP_GT) if peak > 0 else None
+    if mask is None or cv2.countNonZero(mask) < 64:
+        mask = None
+    mean = float(cv2.mean(b, mask=mask)[0])
+    if mean <= 0:
+        return 0.0
+    return float(cv2.meanStdDev(lap, mask=mask)[1][0, 0]) / mean
 
 
 def _green_msb8(raw: np.ndarray, bits: int, box: tuple[int, int, int, int], bayer: str) -> np.ndarray:
@@ -249,7 +264,7 @@ class PreselectStream:
                 box = list(_center_box(mode.delivered_size[0], raw.shape[0], self.roi))
                 box[0] += (mode.size[0] - mode.delivered_size[0]) // 2
                 box = tuple(box)
-                score = _laplacian_var(_green_msb8(raw, bits, box, cam.bayer_pattern))
+                score = _sharpness(_green_msb8(raw, bits, box, cam.bayer_pattern))
                 if not self.presel.accepts(score):
                     return
                 data = _extract_raw(raw, bits, box, self.bit_depth)
@@ -315,7 +330,7 @@ def _capture_and_encode_isp(
     # which already relies on this for the live JPEG preview).
     def score(frame) -> float:
         # canal vert (BGR), un pixel sur deux : même échelle que le RAW
-        return _laplacian_var(_center_crop(frame, roi)[0::2, 0::2, 1])
+        return _sharpness(_center_crop(frame, roi)[0::2, 0::2, 1])
 
     frame, sharpness, tries = _select(camera.capture_frame, score, presel)
     t_capture_done = time.monotonic()
