@@ -2,6 +2,7 @@
 
 import { WsFrameReceiver } from './ws_frame_receiver.js';
 import { autoStretchParams, autoStretchRender, removeGreen8, localContrast8 } from './auto_stretch.js';
+import { applyDeconv } from './deconv.js';
 
 // Bayer pattern string → integer (OpenCV inverted naming : BG=RGGB, RG=BGGR, ...)
 const BAYER_INT = { RGGB: 0, BGGR: 1, GRBG: 2, GBRG: 3 };
@@ -271,6 +272,33 @@ function applySaturation(d, n, sat) {
     }
 }
 
+/**
+ * Saturation sélective (RGBA 8 bits, en place) : la saturation n'augmente
+ * que sur l'objet — pixels dont la luminance dépasse le seuil `thr` (0–1 de
+ * l'affichage), transition douce sur 0,25 au-dessus — et laisse le fond et
+ * son bruit coloré tels quels. amount = gain ajouté au facteur (0 = rien,
+ * 1 = saturation ×2 sur l'objet). Même garde-fou que applySaturation.
+ */
+function applyObjectSaturation(d, n, amount, thr) {
+    if (!(amount > 0)) return;
+    const t0 = 255 * thr, t1 = 255 * Math.min(1, thr + 0.25);
+    for (let i = 0; i < n * 4; i += 4) {
+        const r = d[i], g = d[i+1], b = d[i+2];
+        const y = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (y <= t0) continue;
+        const t = Math.min(1, (y - t0) / Math.max(1, t1 - t0));
+        let k = 1 + amount * t * t * (3 - 2 * t);
+        for (const c of [r, g, b]) {
+            const dc = c - y;
+            if (dc * k > 255 - y) k = (255 - y) / dc;
+            else if (dc * k < -y) k = -y / dc;
+        }
+        d[i]   = y + k * (r - y);
+        d[i+1] = y + k * (g - y);
+        d[i+2] = y + k * (b - y);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preview stretch : percentiles sur échantillon 1/16, LUT arcsinh, rendu canvas
 // ---------------------------------------------------------------------------
@@ -286,7 +314,7 @@ function applySaturation(d, n, sat) {
 function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains = null,
                          contrast = 0, clahe = 0, saturation = 1, bgNeutral = false,
                          removeGreen = false, localContrast = 0,
-                         gamma = 1, discWhite = false, black = 0) {
+                         gamma = 1, discWhite = false, black = 0, objSat = null) {
     const rgba = new Float32Array(float32Buf);
     const n    = w * h;
     // Fond neutre : médianes R, G, B ramenées à leur moyenne (retire la
@@ -387,6 +415,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
     localContrast8(d, w, h, localContrast);
     applyClahe(d, w, h, clahe);
     applySaturation(d, n, saturation);
+    if (objSat) applyObjectSaturation(d, n, objSat.amount, objSat.threshold);
     canvas.getContext('2d').putImageData(idata, 0, 0);
 }
 
@@ -395,7 +424,7 @@ function stretchToCanvas(float32Buf, w, h, canvas, low, high, beta = 0, awbGains
 // entre aperçus, key = identité du snapshot. Renvoie les paramètres utilisés.
 function autoStretchToCanvas(float32Data, w, h, canvas, state, key,
                              { target = null, localContrast = 0, removeGreen = false,
-                               count = 1, clahe = 0, saturation = 1 } = {}) {
+                               count = 1, clahe = 0, saturation = 1, objSat = null } = {}) {
     const rgba = float32Data instanceof Float32Array ? float32Data : new Float32Array(float32Data);
     const p = autoStretchParams(rgba, w, h, state, key, target, { count });
     if (!p) return null;
@@ -406,6 +435,7 @@ function autoStretchToCanvas(float32Data, w, h, canvas, state, key,
     if (removeGreen) removeGreen8(idata.data, w, h);
     applyClahe(idata.data, w, h, clahe);
     applySaturation(idata.data, w * h, saturation);
+    if (objSat) applyObjectSaturation(idata.data, w * h, objSat.amount, objSat.threshold);
     canvas.getContext('2d').putImageData(idata, 0, 0);
     return p;
 }
@@ -629,6 +659,7 @@ export class StreamingStacker extends EventTarget {
         this._lastSharpness   = 0;
         this._exposureHist    = [];
         this._lastSnap        = null;
+        this._deconv          = null;   // déconvolution liée à l'ancien stack
         this._autoState       = {};
         this.lastAutoStretch  = null;
         this._finished        = false;
@@ -675,6 +706,58 @@ export class StreamingStacker extends EventTarget {
     /** Contraste local grande échelle : amplitude (0,8 = réglage par défaut de la page), 0 = désactivé. */
     setLocalContrast(amount) { this._localContrast = amount; this._scheduleRender(); }
     setRemoveGreen(on) { this._removeGreen = on; this._scheduleRender(); }
+    /** Saturation sélective de l'objet : { amount (0 = désactivée), threshold (0–1) }. */
+    setObjectSaturation(o) { this._objSat = o; this._scheduleRender(); }
+
+    /**
+     * Déconvolution du stack affiché (bouton) : calcul dans un worker
+     * (deconv_worker.js), résultat lié à ce snapshot — un nouvel aperçu le
+     * rend obsolète (deconvState 'stale') et l'affichage revient au stack brut.
+     * @param {object} params { iterations, psfScale }
+     * @param {function} [onProgress] (fait, total)
+     */
+    async deconvolve(params, onProgress) {
+        const snap = this._lastSnap;
+        if (!snap) throw new Error('Aucun stack à déconvoluer');
+        this.cancelDeconvolve();
+        const wk = new Worker(new URL('./deconv_worker.js', import.meta.url), { type: 'module' });
+        this._deconvWorker = wk;
+        try {
+            const result = await new Promise((resolve, reject) => {
+                this._deconvReject = reject;
+                wk.onmessage = ({ data }) => {
+                    if (data.type === 'progress') onProgress?.(data.done, data.total);
+                    else if (data.type === 'done') resolve(data.result);
+                    else reject(new Error(data.error));
+                };
+                wk.onerror = (e) => reject(new Error(e.message || 'erreur du worker'));
+                wk.postMessage({ rgba: new Float32Array(snap.data), w: snap.width, h: snap.height, params });
+            });
+            result.masks = new Map();
+            this._deconv = { d: result, src: snap };
+            this._scheduleRender();
+            return result;
+        } finally {
+            wk.terminate();
+            if (this._deconvWorker === wk) { this._deconvWorker = null; this._deconvReject = null; }
+        }
+    }
+
+    cancelDeconvolve() {
+        this._deconvWorker?.terminate();
+        this._deconvWorker = null;
+        this._deconvReject?.(new Error('annulée'));
+        this._deconvReject = null;
+    }
+
+    /** Affichage de la déconvolution : { enabled, antiRing, noiseK, starFrac } (sans recalcul). */
+    setDeconvDisplay(o) { this._deconvOpts = o; this._scheduleRender(); }
+
+    /** 'none' | 'ready' (s'applique au stack affiché) | 'stale' (stack changé depuis). */
+    get deconvState() {
+        if (!this._deconv) return 'none';
+        return this._deconv.src === this._lastSnap ? 'ready' : 'stale';
+    }
     /** Gamma après étirement (> 1 assombrit les tons moyens), étirement manuel. */
     setGamma(g) { this._gamma = g; this._scheduleRender(); }
     /** Point blanc calculé sur le disque de l'objet plutôt que sur toute l'image. */
@@ -1100,6 +1183,12 @@ export class StreamingStacker extends EventTarget {
     }
 
     get lastStarReport() { return this._lastStarReport ?? null; }
+
+    /** Réglages du mode étoiles modifiables en cours d'empilement (tri qualité). */
+    setStarOptions(o) {
+        Object.assign(this._starAlign, o);
+        this._stackWorker?.postMessage({ type: 'set-stars-options', options: o });
+    }
     get rejectedCount()  { return this._rejectedCount ?? 0; }
 
     // -------------------------------------------------------------------------
@@ -1390,19 +1479,22 @@ export class StreamingStacker extends EventTarget {
         const { width: w, height: h } = snap;
         const awbGains = this._awbEnabled ? computeAWBGains(snap.data, w, h, this._blackLevel) : null;
         const post = this._postActive;
-        const sharpened = post ? applyWavelets(snap.data, w, h, this._wavelets, this._waveletDenoise)
-                               : snap.data;
+        const dc = this._deconvOpts;
+        const base = dc?.enabled && this._deconv?.src === snap
+            ? applyDeconv(snap.data, w, h, this._deconv.d, dc) : snap.data;
+        const sharpened = post ? applyWavelets(base, w, h, this._wavelets, this._waveletDenoise)
+                               : base;
         if (this._stretchMode === 'auto') {
             this.lastAutoStretch = autoStretchToCanvas(sharpened, w, h, this._canvas, this._autoState, snap, {
                 target: this._stretchTarget, localContrast: this._localContrast,
                 removeGreen: this._removeGreen, count: Math.max(1, this._stackedCount),
-                clahe: post ? this._clahe : 0, saturation: this._saturation,
+                clahe: post ? this._clahe : 0, saturation: this._saturation, objSat: this._objSat,
             });
         } else {
             stretchToCanvas(sharpened, w, h, this._canvas, this._stretchLow, this._stretchHigh,
                             this._stretchBeta, awbGains, this._contrast, post ? this._clahe : 0,
                             this._saturation, this._bgNeutral, this._removeGreen, this._localContrast,
-                            this._gamma, this._discWhite, this._blackLevel);
+                            this._gamma, this._discWhite, this._blackLevel, this._objSat);
         }
         this.dispatchEvent(new CustomEvent('preview'));
     }

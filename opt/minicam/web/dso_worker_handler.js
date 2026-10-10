@@ -6,6 +6,7 @@
  *   init-stacking { starAlign: {…options}, width, height, bayer } → init-stacking-done
  *   stack-frame-stars { requestId, raw (Uint16Array : Bayer, mono ou 3 plans RGB), black }
  *                                                             → stack-stars-done { requestId, report }
+ *   set-stars-options { options }  réglages modifiables en cours d'empilement (tri qualité)
  *   get-stack-snapshot (mode étoiles actif)                  → stack-snapshot-complete
  *   cleanup                                                  → libère, puis traitement habituel
  *
@@ -47,6 +48,11 @@ export async function handleDsoMessage(data, { forceCpu = false } = {}) {
         } catch (err) {
             self.postMessage({ type: 'stack-frame-error', requestId, error: err.message });
         }
+        return true;
+    }
+
+    if (type === 'set-stars-options') {
+        if (dso) Object.assign(dso.opts, data.options);
         return true;
     }
 

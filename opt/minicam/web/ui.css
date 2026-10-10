@@ -120,6 +120,10 @@ input[type="file"]::file-selector-button {
 .slider > label { color: var(--muted); }
 .slider .hint { display: block; }
 .range-val { text-align: right; font-family: var(--mono); font-size: 12px; }
+.quality-plot {
+  display: block; width: 100%; height: 72px; margin-top: 6px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
+}
 
 .group-title {
   margin: 10px 0 2px; color: var(--muted);
