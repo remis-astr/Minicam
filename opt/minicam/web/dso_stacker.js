@@ -21,7 +21,13 @@
  *      fond de ciel ramené à celui de la référence, couleur par couleur et
  *      point par point (carte de fond de la détection, recalée) : un gradient
  *      de ciel qui change n'est pas pris pour une anomalie au rejet σ ;
- *   4. poids de l'image ∝ (σ_réf / (k·σ))² × min(1, (FWHM_réf / FWHM)²) ;
+ *   4. tri qualité, avant tout empilement : image corrompue (lignes
+ *      parasites de lecture, prises pour des centaines d'étoiles alignées)
+ *      rejetée ; forme des étoiles brillantes (HFR, allongement — voir
+ *      starShape) comparée à la meilleure qualité vue jusqu'ici (20e
+ *      centile des HFR) : HFR > (1 + maxHfrRatio) × ce niveau, ou
+ *      allongement > maxElong, rejeté ;
+ *      poids de l'image ∝ (σ_réf / (k·σ))² × min(1, (HFR_réf / HFR)²) ;
  *   5. drizzle Bayer : chaque pixel brut est déposé, dans son canal, à sa
  *      position recalée (goutte carrée de côté pixfrac, poids = surface
  *      recouverte) — ni débayérisage ni interpolation de l'image recalée ;
@@ -32,7 +38,7 @@
  *      empilée ; l'écart toléré inclut une part du signal (β·signal), pour
  *      ne pas rejeter les ailes d'étoiles d'une image plus floue ;
  *   7. référence : parmi les `refCandidates` premières images, la plus fine
- *      (FWHM) devient la référence et ces images sont réempilées.
+ *      (HFR) devient la référence et ces images sont réempilées.
  * Au rendu : un canal peu ou pas couvert en un pixel (premières images, ou
  * pas de dithering) est estimé par débayérisage Malvar-He-Cutler de la
  * mosaïque empilée, mélangé au drizzle selon la couverture ; alpha =
@@ -68,8 +74,9 @@ export const DSO_DEFAULTS = {
     photometric:   true,          // normalisation par le flux des étoiles
     weighting:     true,          // poids bruit + FWHM
     refCandidates: 5,             // la meilleure des N premières devient la référence
-    maxFwhmRatio:  0,             // rejet si FWHM > ratio × réf. (0 = jamais)
-    maxElong:      0,             // rejet si allongement médian > valeur (0 = jamais)
+    maxHfrRatio:   0,             // rejet si HFR > (1 + valeur) × meilleur niveau vu (0 = jamais)
+    maxElong:      0,             // rejet si allongement médian (starShape) > valeur (0 = jamais)
+    lineReject:    true,          // rejet des images à lignes parasites (lecture corrompue)
 };
 
 const INV16 = 1 / 65535;
@@ -95,6 +102,88 @@ const median = (a) => {
     const s = Float64Array.from(a).sort();
     return s.length ? (s.length % 2 ? s[s.length >> 1] : 0.5 * (s[s.length / 2 - 1] + s[s.length / 2])) : 0;
 };
+
+const SHAPE_R = 12;       // rayon de mesure de la forme (pixels binnés)
+const SHAPE_STARS = 30;   // étoiles mesurées (les plus brillantes non saturées)
+
+/**
+ * Forme des étoiles pour le tri qualité : HFR (rayon contenant la moitié du
+ * flux, pixels pleine résolution) et allongement (racine du rapport des
+ * valeurs propres des moments), médianes sur les étoiles brillantes non
+ * saturées, mesurées sur la luminance binnée 2×2 dans un disque de rayon
+ * SHAPE_R, fond = médiane de l'anneau [R, R+2]. La fenêtre 7×7 de la
+ * détection tronque une étoile filée : sur M57, des traînées 3–4× plus
+ * longues que les étoiles rondes n'y gagnaient que 7 % de FWHM (dans la
+ * dispersion des bonnes images) ; ici HFR 4,3–5,7 contre 3,6–4,0 px.
+ * Quelques centaines de lectures par étoile : négligeable devant le reste.
+ */
+function starShape(planes, w, h, stars) {
+    const bw = w >> 1, bh = h >> 1, R = SHAPE_R, Ro = R + 2, D = 2 * Ro + 1;
+    const win = new Float64Array(D * D), ring = [];
+    const hfr = [], elong = [];
+    for (const s of stars) {
+        if (hfr.length >= SHAPE_STARS) break;
+        if (s.sat) continue;
+        const cx = Math.floor(s.x / 2), cy = Math.floor(s.y / 2);
+        if (cx < Ro || cy < Ro || cx >= bw - Ro || cy >= bh - Ro) continue;
+        ring.length = 0;
+        for (let dy = -Ro; dy <= Ro; dy++) {
+            for (let dx = -Ro; dx <= Ro; dx++) {
+                const o = 2 * (cy + dy) * w + 2 * (cx + dx);
+                let v = 0;
+                for (const p of planes) v += p[o] + p[o + 1] + p[o + w] + p[o + w + 1];
+                win[(dy + Ro) * D + dx + Ro] = v;
+                const r2 = dx * dx + dy * dy;
+                if (r2 > R * R && r2 <= Ro * Ro) ring.push(v);
+            }
+        }
+        const bg = median(ring);
+        let S = 0, sx = 0, sy = 0;
+        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+            if (dx * dx + dy * dy > R * R) continue;
+            const v = Math.max(0, win[(dy + Ro) * D + dx + Ro] - bg);
+            S += v; sx += v * dx; sy += v * dy;
+        }
+        if (!(S > 0)) continue;
+        const mx = sx / S, my = sy / S;
+        let hr = 0, xx = 0, yy = 0, xy = 0;
+        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+            if (dx * dx + dy * dy > R * R) continue;
+            const v = Math.max(0, win[(dy + Ro) * D + dx + Ro] - bg);
+            const ex = dx - mx, ey = dy - my;
+            hr += v * Math.hypot(ex, ey); xx += v * ex * ex; yy += v * ey * ey; xy += v * ex * ey;
+        }
+        const tr = (xx + yy) / (2 * S), disc = Math.hypot((xx - yy) / (2 * S), xy / S);
+        hfr.push(2 * hr / S);
+        elong.push(Math.sqrt((tr + disc) / Math.max(1e-6, tr - disc)));
+    }
+    return hfr.length >= 5 ? { hfr: median(hfr), elong: median(elong) } : { hfr: NaN, elong: NaN };
+}
+
+/**
+ * Part des détections tombant sur des lignes parasites : une lecture
+ * corrompue (lignes de pixels aberrants, cf. M57 251015212940_*) donne des
+ * centaines de « étoiles » alignées sur quelques lignes. Une détection est
+ * « sur une ligne » si sa ligne binnée et ses deux voisines en portent au
+ * moins 6 ; dans un vrai champ (300 étoiles sur 540 lignes) c'est rare.
+ */
+function lineFraction(stars) {
+    if (stars.length < 50) return 0;
+    const rows = new Map();
+    for (const s of stars) { const r = Math.floor(s.y / 2); rows.set(r, (rows.get(r) ?? 0) + 1); }
+    let on = 0;
+    for (const s of stars) {
+        const r = Math.floor(s.y / 2);
+        if ((rows.get(r - 1) ?? 0) + rows.get(r) + (rows.get(r + 1) ?? 0) >= 6) on++;
+    }
+    return on / stars.length;
+}
+
+/** Niveau de qualité de référence : 20e centile des HFR mesurées (100 dernières). */
+function hfrLevel(list) {
+    const a = Float64Array.from(list.slice(-100)).sort();
+    return a.length ? a[Math.floor(0.2 * (a.length - 1))] : NaN;
+}
 
 // ---------------------------------------------------------------------------
 // Shaders
@@ -351,8 +440,16 @@ function select(a, n, k) {
  * ligne, la médiane mesure la scène et toute la ligne est décalée (trait
  * horizontal sur toute la largeur). Trop peu de pixels restants : pas de
  * correction pour cette ligne.
+ * Ce garde ne voit que les bords nettement au-dessus du bruit : à fort gain,
+ * un bord faible (frise, arête de plafond) passe et biaise encore la médiane
+ * de plusieurs dizaines d'ADU, à l'identique sur chaque image — le stack
+ * accumule alors des traits que le bruit de ligne réel (aléatoire d'une image
+ * à l'autre, ~5 ADU mesurés sur l'IMX477) n'aurait jamais produits. Avec
+ * `hist` (sommes par ligne et couleur sur les images déjà vues), on ne
+ * soustrait que l'écart du décalage à sa moyenne : la part fixe (scène) s'annule,
+ * la part temporelle (bruit de ligne) reste corrigée.
  */
-function rowBandingCPU(raw, w, h) {
+function rowBandingCPU(raw, w, h, hist = null) {
     const out = new Uint16Array(raw);
     const cap = (w >> 2) + 2;
     const R = [2, 4, 6, 8];
@@ -391,7 +488,12 @@ function rowBandingCPU(raw, w, h) {
             const lim = 4 * (select(e, m, m >> 1) || 1);
             let nk = 0;
             for (let i = 0; i < m; i++) if (Math.abs(d[i] - med) < lim) kept[nk++] = d[i];
-            const off = nk ? select(kept, nk, nk >> 1) : 0;
+            let off = nk ? select(kept, nk, nk >> 1) : 0;
+            if (hist) {
+                const i = 2 * y + par;
+                hist.sum[i] += off; hist.cnt[i]++;
+                off -= hist.sum[i] / hist.cnt[i];
+            }
             if (Math.abs(off) > maxOff) maxOff = Math.abs(off);
             if (Math.abs(off) < 0.5) continue;
             for (let x = par; x < w; x += 2) {
@@ -669,7 +771,9 @@ export class DsoStacker {
         this.prior = null;
         this.count = 0;
         this.sigmaRaw = null;     // bruit d'un pixel brut (ADU) pour les pixels chauds
+        this.rowHist = [];        // par plan : décalages de ligne cumulés (part fixe due à la scène)
         this.candidates = [];     // premières images, pour choisir la référence
+        this.hfrSeen = [];        // HFR des images mesurées (tri qualité)
         this.refLocked = this.opts.refCandidates <= 1;
     }
 
@@ -816,7 +920,8 @@ export class DsoStacker {
         for (let k = 0; k < np; k++) {
             let pl = data.subarray(k * n, (k + 1) * n);
             if (o.rowBanding) {
-                const r = rowBandingCPU(pl, w, h);
+                this.rowHist[k] ??= { sum: new Float64Array(2 * h), cnt: new Uint32Array(2 * h) };
+                const r = rowBandingCPU(pl, w, h, this.rowHist[k]);
                 pl = r.fixed; banding = Math.max(banding, r.maxOff);
             }
             planes.push(pl);
@@ -884,16 +989,29 @@ export class DsoStacker {
         const sigma = Math.max(det.sigma, 2);
         this.sigmaRaw = sigma / 2;
         const fwhm = median(stars.filter((s) => !s.sat).map((s) => s.fwhm));
-        const elong = median(stars.filter((s) => !s.sat).map((s) => s.elong));
         const bg = this._skyMedians(planes, black);
         timing.detect = performance.now() - t; t = performance.now();
 
-        const report = { stars: stars.length, fwhm, elong, background: bg, timing };
+        const lineFrac = lineFraction(stars);
+        const shape = starShape(planes, w, h, stars);
+        const hfr = shape.hfr, elong = shape.elong;
+        const report = { stars: stars.length, fwhm, hfr, elong, lineFrac, background: bg, timing };
+        // 4. tri qualité : lignes parasites, puis forme des étoiles
+        if (o.lineReject && lineFrac > 0.3)
+            return { ...report, accepted: false, reason: `image corrompue (lignes parasites)` };
+        if (Number.isFinite(hfr) && !_replay) this.hfrSeen.push(hfr);
+        const hfrRef = hfrLevel(this.hfrSeen);
+        report.hfrRef = hfrRef;
+        report.hfrLimit = o.maxHfrRatio > 0 ? (1 + o.maxHfrRatio) * hfrRef : null;
+        if (report.hfrLimit && hfr > report.hfrLimit)
+            return { ...report, accepted: false, reason: `étoiles floues (HFR ${hfr.toFixed(1)} > ${report.hfrLimit.toFixed(1)} px)` };
+        if (o.maxElong > 0 && elong > o.maxElong)
+            return { ...report, accepted: false, reason: `étoiles filées (allongement ${elong.toFixed(2)})` };
         let M, k = 1;
         if (!this.ref) {
             if (o.align && stars.length < o.minStars)
                 return { ...report, accepted: false, reason: `${stars.length} étoiles (réf.)` };
-            this.ref = { stars, bg, sigma, fwhm, grid: normGrid(det.background) };
+            this.ref = { stars, bg, sigma, fwhm, hfr, grid: normGrid(det.background) };
             M = [1, 0, 0, 0, 1, 0];
             Object.assign(report, { inliers: stars.length, rms: 0, dx: 0, dy: 0, rotationDeg: 0, method: 'référence' });
         } else if (!o.align) {
@@ -909,10 +1027,6 @@ export class DsoStacker {
             const d = describeTransform(m.M);
             Object.assign(report, { inliers: m.inliers, rms: m.rms, method: m.method,
                                     dx: d.dx, dy: d.dy, rotationDeg: d.rotationDeg });
-            if (o.maxFwhmRatio > 0 && fwhm > o.maxFwhmRatio * this.ref.fwhm)
-                return { ...report, accepted: false, reason: `FWHM ${fwhm.toFixed(1)} px` };
-            if (o.maxElong > 0 && elong > o.maxElong)
-                return { ...report, accepted: false, reason: `étoiles allongées (${elong.toFixed(2)})` };
             // 3. photométrie : flux des étoiles appariées, non saturées
             if (o.photometric) {
                 const r = m.pairs.filter(([i, j]) => !stars[i].sat && !this.ref.stars[j].sat)
@@ -929,9 +1043,10 @@ export class DsoStacker {
         // normalisée, × fond global par couleur)
         const gridCur = normGrid(det.background);
         let weight = o.weighting
-            ? (this.ref.sigma / (k * sigma)) ** 2 * Math.min(1, (this.ref.fwhm / fwhm) ** 2)
+            ? (this.ref.sigma / (k * sigma)) ** 2 * Math.min(1, Number.isFinite(hfr) && Number.isFinite(this.ref.hfr)
+                ? (this.ref.hfr / hfr) ** 2 : (this.ref.fwhm / fwhm) ** 2)
             : 1;
-        if (!Number.isFinite(weight) || weight <= 0) weight = 1;   // FWHM inconnue (aucune étoile non saturée)…
+        if (!Number.isFinite(weight) || weight <= 0) weight = 1;   // taille inconnue (aucune étoile non saturée)…
         const P = {
             M, Mi: invertTransform(M), black, k, pf: o.pixfrac, kappa: o.kappa, kappaLow: o.kappaLow,
             fw: weight, bg: bg.map((v) => k * v), rbg: this.ref.bg,
@@ -980,7 +1095,7 @@ export class DsoStacker {
 
         // 7. choix de la référence parmi les premières images
         if (!_replay && !this.refLocked) {
-            this.candidates.push({ raw: data.slice(), black, fwhm, stars: stars.length });
+            this.candidates.push({ raw: data.slice(), black, size: Number.isFinite(hfr) ? hfr : fwhm, stars: stars.length });
             if (this.candidates.length >= o.refCandidates) await this._chooseReference(report);
         }
         return report;
@@ -993,12 +1108,12 @@ export class DsoStacker {
         const maxStars = Math.max(...cands.map((c) => c.stars));
         let best = 0;
         cands.forEach((c, i) => {
-            if (c.stars >= 0.7 * maxStars && c.fwhm < cands[best].fwhm) best = i;
+            if (c.stars >= 0.7 * maxStars && c.size < cands[best].size) best = i;
         });
-        if (best === 0 || cands[best].fwhm > 0.97 * cands[0].fwhm) return;   // gain négligeable
+        if (best === 0 || cands[best].size > 0.97 * cands[0].size) return;   // gain négligeable
         // Nouvelle référence : stack refait avec ces images, la meilleure d'abord
-        console.log(`[DSO] référence : image ${best + 1}/${cands.length} (FWHM ${cands[best].fwhm.toFixed(2)} `
-                    + `contre ${cands[0].fwhm.toFixed(2)} px) — réempilement`);
+        console.log(`[DSO] référence : image ${best + 1}/${cands.length} (HFR ${cands[best].size.toFixed(2)} `
+                    + `contre ${cands[0].size.toFixed(2)} px) — réempilement`);
         this._clearAccumulators();
         this.ref = null; this.prior = null; this.count = 0;
         for (const i of [best, ...cands.keys()].filter((v, j, a) => a.indexOf(v) === j))

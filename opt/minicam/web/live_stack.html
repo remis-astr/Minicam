@@ -83,6 +83,23 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
           <label for="align-toggle">Alignement sur les étoiles</label>
           <input type="checkbox" id="align-toggle" checked>
         </div>
+        <div class="group-title">Tri des images</div>
+        <div class="field check">
+          <label for="quality-on" title="Décoché : toutes les images alignées sont empilées (ni HFR, ni allongement, ni images corrompues). Modifiable pendant l'empilement">Rejeter les mauvaises images</label>
+          <input type="checkbox" id="quality-on" checked>
+        </div>
+        <div class="slider">
+          <label for="max-hfr" title="Rejette une image dont les étoiles sont plus étalées (HFR, rayon contenant la moitié du flux) que ce pourcentage au-dessus des meilleures images vues jusqu'ici (flou, turbulence, mise au point) ; 0 = jamais. Modifiable pendant l'empilement">HFR max</label>
+          <input type="range" id="max-hfr" min="0" max="100" step="5" value="20">
+          <span class="range-val" id="max-hfr-val">+20 %</span>
+        </div>
+        <div class="slider">
+          <label for="max-elong" title="Rejette une image dont les étoiles sont filées (suivi, vent, choc) : allongement médian des étoiles brillantes, 1 = rondes ; tout à droite = jamais. Modifiable pendant l'empilement">Allongement max</label>
+          <input type="range" id="max-elong" min="110" max="200" step="5" value="140">
+          <span class="range-val" id="max-elong-val">1,40</span>
+        </div>
+        <canvas id="quality-plot" class="quality-plot" title="HFR de chaque image (points) et limite de rejet (tirets) ; plein = empilée, creux = rejetée"></canvas>
+        <p class="note">Images corrompues (lignes parasites) rejetées tant que le tri est actif.</p>
       </div>
     </details>
 
@@ -159,13 +176,13 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
         </div>
         <div id="manual-rows" class="hidden" style="display:flex;flex-direction:column;gap:8px;">
           <div class="slider">
-            <label for="stretch-lo">Fond de ciel <span class="hint">percentile noir</span></label>
-            <input type="range" id="stretch-lo" min="0" max="5" step="0.1" value="0.1">
+            <label for="stretch-lo" title="Part des pixels ramenés au noir : jusqu'à 50 % pour assombrir le fond autour d'un petit objet (échelle dilatée vers le bas : fin réglage sous 1 %)">Fond de ciel <span class="hint">percentile noir</span></label>
+            <input type="range" id="stretch-lo" min="0" max="100" step="0.5" value="4.5">
             <span class="range-val" id="stretch-lo-val">0.1 %</span>
           </div>
           <div class="slider">
-            <label for="stretch-beta">Arcsinh β <span class="hint">0 = linéaire</span></label>
-            <input type="range" id="stretch-beta" min="0" max="20" step="0.5" value="0">
+            <label for="stretch-beta" title="Force de l'étirement arcsinh, de 1 à 1000 (échelle logarithmique) : plus β est grand, plus les parties faibles remontent sans brûler les brillantes">Arcsinh β <span class="hint">0 = linéaire</span></label>
+            <input type="range" id="stretch-beta" min="0" max="60" step="1" value="0">
             <span class="range-val" id="stretch-beta-val">0</span>
           </div>
           <div class="slider">
@@ -193,6 +210,51 @@ try { if (localStorage.getItem('minicam.theme') === 'night') document.documentEl
           <label for="saturation">Saturation</label>
           <input type="range" id="saturation" min="0" max="300" step="5" value="100">
           <span class="range-val" id="saturation-val">100 %</span>
+        </div>
+        <div class="slider">
+          <label for="obj-sat" title="Renforce la couleur de l'objet seulement (pixels plus clairs que le seuil), sans colorer le bruit du fond ; 0 = désactivé">Couleur objet</label>
+          <input type="range" id="obj-sat" min="0" max="200" step="5" value="0">
+          <span class="range-val" id="obj-sat-val">non</span>
+        </div>
+        <div class="slider">
+          <label for="obj-thr" title="Niveau d'affichage à partir duquel un pixel compte comme objet (0 % = noir, 100 % = blanc) ; transition douce au-dessus">Seuil objet</label>
+          <input type="range" id="obj-thr" min="5" max="80" step="1" value="25">
+          <span class="range-val" id="obj-thr-val">25 %</span>
+        </div>
+
+        <div class="group-title">Déconvolution</div>
+        <div class="field check">
+          <label for="deconv-on" title="Affiche le stack déconvolué (une fois calculé) ; décoché = stack brut. Les trois derniers réglages agissent sans recalcul">Appliquer</label>
+          <input type="checkbox" id="deconv-on" checked>
+        </div>
+        <div class="button-pair">
+          <button id="btn-deconv" title="Richardson-Lucy sur la luminance, flou (PSF) mesuré sur les étoiles du stack ; à relancer après de nouvelles images">Déconvoluer</button>
+        </div>
+        <div id="deconv-status" class="note">Pas encore calculée.</div>
+        <div class="slider">
+          <label for="deconv-iter" title="Nombre d'itérations : plus = plus de détail, mais plus de bruit et d'artefacts (recalcul)">Itérations</label>
+          <input type="range" id="deconv-iter" min="5" max="100" step="5" value="30">
+          <span class="range-val" id="deconv-iter-val">30</span>
+        </div>
+        <div class="slider">
+          <label for="deconv-psf" title="Taille du flou corrigé, en % de celui mesuré sur les étoiles (HFR) ; au-delà de 100 % : surcorrection (recalcul)">Taille PSF</label>
+          <input type="range" id="deconv-psf" min="50" max="150" step="5" value="85">
+          <span class="range-val" id="deconv-psf-val">85 %</span>
+        </div>
+        <div class="slider">
+          <label for="deconv-ring" title="Limite l'assombrissement autour des structures (anneaux sombres de la déconvolution) ; 100 % = la déconvolution ne fait que rehausser, 0 = aucune limite">Anti-anneaux</label>
+          <input type="range" id="deconv-ring" min="0" max="100" step="5" value="50">
+          <span class="range-val" id="deconv-ring-val">50 %</span>
+        </div>
+        <div class="slider">
+          <label for="deconv-noise" title="N'applique la déconvolution que là où le signal dépasse ce nombre de σ du bruit : le fond ne grainne pas ; 0 = partout">Protection fond</label>
+          <input type="range" id="deconv-noise" min="0" max="20" step="1" value="5">
+          <span class="range-val" id="deconv-noise-val">5 σ</span>
+        </div>
+        <div class="slider">
+          <label for="deconv-stars" title="Laisse intactes les étoiles plus brillantes que cette part du pic de l'image (cœur écrêté : anneaux clairs et sombres) ; 0 = aucune protection">Étoiles brillantes</label>
+          <input type="range" id="deconv-stars" min="0" max="50" step="1" value="20">
+          <span class="range-val" id="deconv-stars-val">20 %</span>
         </div>
         <p class="note">Le FITS reste brut : l'étirement n'agit que sur l'aperçu et le PNG.</p>
       </div>
@@ -334,6 +396,164 @@ ctrlWs.connect();
 // Alignement : choisi au démarrage (grisé pendant l'empilement)
 const elAlign = document.getElementById('align-toggle');
 
+// Tri des images : HFR (relatif aux meilleures vues) et allongement (absolu),
+// modifiables pendant l'empilement ; graphe des HFR par image
+const elMaxHfr = document.getElementById('max-hfr');
+const elMaxElong = document.getElementById('max-elong');
+const elQPlot = document.getElementById('quality-plot');
+const qualityHist = [];   // { hfr, limit, accepted, quality } par image
+const elQualityOn = document.getElementById('quality-on');
+const qualityOpts = () => elQualityOn.checked ? {
+    maxHfrRatio: parseInt(elMaxHfr.value) / 100,
+    maxElong: elMaxElong.value === elMaxElong.max ? 0 : parseInt(elMaxElong.value) / 100,
+    lineReject: true,
+} : { maxHfrRatio: 0, maxElong: 0, lineReject: false };
+function showQualityOpts() {
+    document.getElementById('max-hfr-val').textContent = elMaxHfr.value === '0' ? 'non' : `+${elMaxHfr.value} %`;
+    document.getElementById('max-elong-val').textContent = elMaxElong.value === elMaxElong.max
+        ? 'non' : (parseInt(elMaxElong.value) / 100).toFixed(2).replace('.', ',');
+}
+for (const [el, key] of [[elMaxHfr, 'maxHfr'], [elMaxElong, 'maxElong']]) {
+    try { const v = localStorage.getItem('live.' + key); if (v != null) el.value = v; } catch {}
+    el.addEventListener('input', () => {
+        try { localStorage.setItem('live.' + key, el.value); } catch {}
+        showQualityOpts();
+        view()?.setStarOptions(qualityOpts());
+    });
+}
+try { if (localStorage.getItem('live.qualityOn') === '0') elQualityOn.checked = false; } catch {}
+function showQualityOn() { elMaxHfr.disabled = elMaxElong.disabled = !elQualityOn.checked; }
+elQualityOn.addEventListener('change', () => {
+    try { localStorage.setItem('live.qualityOn', elQualityOn.checked ? '1' : '0'); } catch {}
+    showQualityOn();
+    view()?.setStarOptions(qualityOpts());
+});
+showQualityOn();
+showQualityOpts();
+function pushQuality(r) {
+    if (!r || !Number.isFinite(r.hfr)) return;
+    const quality = !r.accepted && /floues|filées/.test(r.reason ?? '');
+    qualityHist.push({ hfr: r.hfr, limit: r.hfrLimit ?? null, accepted: r.accepted, quality });
+    if (qualityHist.length > 300) qualityHist.shift();
+    drawQuality();
+}
+function drawQuality() {
+    const c = elQPlot, dpr = window.devicePixelRatio || 1;
+    const W = c.clientWidth, H = c.clientHeight;
+    if (!W || !H) return;
+    c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const css = getComputedStyle(document.documentElement);
+    const col = (v) => css.getPropertyValue(v).trim();
+    ctx.font = `10px ${col('--mono')}`;
+    ctx.fillStyle = col('--muted');
+    if (!qualityHist.length) { ctx.fillText('HFR par image', 4, 12); return; }
+    const vals = qualityHist.flatMap((q) => q.limit ? [q.hfr, q.limit] : [q.hfr]);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (hi - lo < 1) { lo -= 0.5; hi += 0.5; }
+    const pad = 0.08 * (hi - lo); lo -= pad; hi += pad;
+    const n = qualityHist.length, x = (i) => 6 + (W - 12) * (n > 1 ? i / (n - 1) : 0.5);
+    const y = (v) => H - 4 - (H - 18) * (v - lo) / (hi - lo);
+    ctx.fillText(`HFR ${hi.toFixed(1)}`, 4, 10);
+    ctx.fillText(lo.toFixed(1), 4, H - 3);
+    ctx.strokeStyle = col('--warn'); ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.beginPath();
+    let on = false;
+    qualityHist.forEach((q, i) => {
+        if (q.limit == null) { on = false; return; }
+        on ? ctx.lineTo(x(i), y(q.limit)) : ctx.moveTo(x(i), y(q.limit));
+        on = true;
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+    qualityHist.forEach((q, i) => {
+        ctx.beginPath(); ctx.arc(x(i), y(q.hfr), 2.2, 0, 2 * Math.PI);
+        if (q.accepted) { ctx.fillStyle = col('--good'); ctx.fill(); }
+        else { ctx.strokeStyle = col(q.quality ? '--bad' : '--muted'); ctx.stroke(); }
+    });
+}
+new ResizeObserver(drawQuality).observe(elQPlot);
+
+// Couleur de l'objet (saturation sélective) et déconvolution : réglages
+// mémorisés ; tout est désactivable (0 = non, case Appliquer)
+const elObjSat = document.getElementById('obj-sat'), elObjThr = document.getElementById('obj-thr');
+const elDeconvOn = document.getElementById('deconv-on'), btnDeconv = document.getElementById('btn-deconv');
+const elDeconvStatus = document.getElementById('deconv-status');
+const dcEl = Object.fromEntries(['iter', 'psf', 'ring', 'noise', 'stars']
+    .map((k) => [k, document.getElementById('deconv-' + k)]));
+const keep = (el, key) => {
+    try { const v = localStorage.getItem('live.' + key); if (v != null) el.value = v; } catch {}
+    el.addEventListener('input', () => { try { localStorage.setItem('live.' + key, el.value); } catch {} });
+};
+keep(elObjSat, 'objSat'); keep(elObjThr, 'objThr');
+for (const [k, el] of Object.entries(dcEl)) keep(el, 'deconv.' + k);
+try { if (localStorage.getItem('live.deconvOn') === '0') elDeconvOn.checked = false; } catch {}
+const objSatOpts = () => ({ amount: parseInt(elObjSat.value) / 100, threshold: parseInt(elObjThr.value) / 100 });
+const deconvParams = () => ({ iterations: parseInt(dcEl.iter.value), psfScale: parseInt(dcEl.psf.value) / 100 });
+const deconvDisplay = () => ({
+    enabled: elDeconvOn.checked, antiRing: parseInt(dcEl.ring.value) / 100,
+    noiseK: parseInt(dcEl.noise.value), starFrac: parseInt(dcEl.stars.value) / 100,
+});
+function showRenderExtras() {
+    document.getElementById('obj-sat-val').textContent = elObjSat.value === '0' ? 'non' : `+${elObjSat.value} %`;
+    document.getElementById('obj-thr-val').textContent = elObjThr.value + ' %';
+    document.getElementById('deconv-iter-val').textContent = dcEl.iter.value;
+    document.getElementById('deconv-psf-val').textContent = dcEl.psf.value + ' %';
+    document.getElementById('deconv-ring-val').textContent = dcEl.ring.value === '0' ? 'non' : dcEl.ring.value + ' %';
+    document.getElementById('deconv-noise-val').textContent = dcEl.noise.value === '0' ? 'non' : dcEl.noise.value + ' σ';
+    document.getElementById('deconv-stars-val').textContent = dcEl.stars.value === '0' ? 'non' : dcEl.stars.value + ' %';
+}
+showRenderExtras();
+let deconvInfo = null, deconvBusy = false, deconvMade = null;   // paramètres du dernier calcul
+function showDeconvState() {
+    if (deconvBusy) return;
+    const st = view()?.deconvState ?? 'none';
+    const p = deconvParams();
+    if (st === 'none' || !deconvInfo) elDeconvStatus.textContent = 'Pas encore calculée.';
+    else if (st === 'stale') elDeconvStatus.textContent = 'Stack changé depuis : relancer « Déconvoluer ».';
+    else elDeconvStatus.textContent = deconvInfo + (deconvMade && (deconvMade.iterations !== p.iterations
+        || deconvMade.psfScale !== p.psfScale) ? ' — réglages changés : relancer.' : '');
+}
+for (const el of [elObjSat, elObjThr]) el.addEventListener('input', () => {
+    showRenderExtras();
+    view()?.setObjectSaturation(objSatOpts());
+});
+for (const k of ['ring', 'noise', 'stars']) dcEl[k].addEventListener('input', () => {
+    showRenderExtras();
+    view()?.setDeconvDisplay(deconvDisplay());
+});
+for (const k of ['iter', 'psf']) dcEl[k].addEventListener('input', () => { showRenderExtras(); showDeconvState(); });
+elDeconvOn.addEventListener('change', () => {
+    try { localStorage.setItem('live.deconvOn', elDeconvOn.checked ? '1' : '0'); } catch {}
+    view()?.setDeconvDisplay(deconvDisplay());
+});
+btnDeconv.addEventListener('click', async () => {
+    const v = view();
+    if (!v) { elDeconvStatus.textContent = 'Aucun stack à déconvoluer.'; return; }
+    if (deconvBusy) { v.cancelDeconvolve(); return; }   // second clic : annule
+    deconvBusy = true;
+    btnDeconv.textContent = 'Annuler';
+    const t0 = performance.now(), p = deconvParams();
+    elDeconvStatus.textContent = 'Mesure du flou…';
+    try {
+        v.setDeconvDisplay(deconvDisplay());
+        const r = await v.deconvolve(p, (d, t) => { elDeconvStatus.textContent = `Itération ${d} / ${t}…`; });
+        deconvMade = p;
+        const dt = (performance.now() - t0) / 1000;
+        deconvInfo = `HFR ${r.hfr.toFixed(1)} px → PSF σ ${r.psfSigma.toFixed(1)} px, `
+                   + `${r.iterations} itérations en ${dt < 10 ? dt.toFixed(1) : dt.toFixed(0)} s `
+                   + `(${r.backend === 'gpu' ? 'GPU' : 'processeur'}).`;
+    } catch (e) {
+        deconvInfo = null;
+        elDeconvStatus.textContent = `Déconvolution impossible : ${e.message}`;
+    } finally {
+        deconvBusy = false;
+        btnDeconv.textContent = 'Déconvoluer';
+    }
+    if (deconvInfo) showDeconvState();
+});
+
 // Mode capteur et ROI : listes construites depuis les modes du capteur
 // branché (statut /ws/control) — le ROI ne propose que des recadrages qui
 // tiennent dans le mode choisi. Grisés pendant l'empilement.
@@ -363,21 +583,29 @@ elExpo.addEventListener('change', () => {
 });
 
 // Range sliders
+// Fond de ciel : position 0–100 → 0–50 % (quadratique, fin sous 1 %) ;
+// arcsinh : position 0–60 → β = 10^(pos/20), soit 1 à 1000 (0 = linéaire)
+const loPct = () => 50 * (parseFloat(elStretchLo.value) / 100) ** 2;
+const betaVal = () => {
+    const p = parseFloat(elStretchBeta.value);
+    return p === 0 ? 0 : +(10 ** (p / 20)).toPrecision(2);
+};
+const fmtPct = (v) => (v < 10 ? v.toFixed(v < 1 ? 2 : 1) : v.toFixed(0)) + ' %';
 function stretchValues() {
     return {
-        lo:   parseFloat(elStretchLo.value)   / 100,
+        lo:   loPct() / 100,
         hi:   parseFloat(elStretchHi.value)   / 100,
-        beta: parseFloat(elStretchBeta.value),
+        beta: betaVal(),
     };
 }
 elStretchLo.addEventListener('input', () => {
-    elStretchLoVal.textContent = parseFloat(elStretchLo.value).toFixed(1) + ' %';
+    elStretchLoVal.textContent = fmtPct(loPct());
     const { lo, hi, beta } = stretchValues();
     view()?.setStretch(lo, hi, beta);
 });
 elStretchBeta.addEventListener('input', () => {
-    const v = parseFloat(elStretchBeta.value);
-    elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : v.toFixed(1);
+    const v = betaVal();
+    elStretchBetaVal.textContent = v === 0 ? '0 (linéaire)' : String(v);
     view()?.setStretchBeta(v);
 });
 elStretchHi.addEventListener('input', () => {
@@ -455,6 +683,9 @@ elRemoveGreen.addEventListener('change', () => {
     view()?.setRemoveGreen(elRemoveGreen.checked);
 });
 
+const shapeTxt = (r) => Number.isFinite(r.hfr)
+    ? `HFR ${r.hfr.toFixed(1)} px, allongement ${r.elong.toFixed(2)}` : `FWHM ${r.fwhm.toFixed(1)} px`;
+
 function updateStats() {
     const v = view();
     const sc = v?.stackedCount ?? 0;
@@ -466,8 +697,8 @@ function updateStats() {
     let starLine = '';
     if (r) {
         starLine = r.accepted
-            ? (r.method === 'sans alignement' ? `\nSans alignement — ${r.stars} étoiles, FWHM ${r.fwhm.toFixed(1)} px`
-               : `\nÉtoiles : ${r.inliers}/${r.stars} appariées, résidu ${r.rms.toFixed(2)} px, FWHM ${r.fwhm.toFixed(1)} px`) +
+            ? (r.method === 'sans alignement' ? `\nSans alignement — ${r.stars} étoiles, ${shapeTxt(r)}`
+               : `\nÉtoiles : ${r.inliers}/${r.stars} appariées, résidu ${r.rms.toFixed(2)} px, ${shapeTxt(r)}`) +
               `\nDérive : ${r.dx.toFixed(0)}, ${r.dy.toFixed(0)} px, rotation ${r.rotationDeg.toFixed(2)}°` +
               `\nFlux ×${(r.scale ?? 1).toFixed(2)}, poids ${(r.weight ?? 1).toFixed(2)}, pixels chauds ${r.hotPixels ?? 0}, rejets σ ${r.clipped ?? 0}`
             : `\nDernière image rejetée : ${r.reason}`;
@@ -508,7 +739,7 @@ btnStart.addEventListener('click', async () => {
         options: {
             stretchLow:  lo,
             stretchHigh: hi,
-            stretchBeta: parseFloat(elStretchBeta.value),
+            stretchBeta: betaVal(),
             saturation:  parseInt(elSaturation.value) / 100,
             bgNeutral:   elBgNeutral.checked,
             stretchMode:   elStretchMode.value,
@@ -519,12 +750,15 @@ btnStart.addEventListener('click', async () => {
             // Case décochée : même empilement ciel profond, sans recalage
             // (monture guidée) — pixels chauds, verts, bruit de ligne, rejet σ inclus.
             alignMode:   'stars',
-            starAlign:   { model: 'similarity', align: elAlign.checked },
+            starAlign:   { model: 'similarity', align: elAlign.checked, ...qualityOpts() },
             roi:         parseRoi(elRoi.value),
         },
     });
 
-    stacker.addEventListener('frame', () => {
+    qualityHist.length = 0;
+    drawQuality();
+    stacker.addEventListener('frame', (ev) => {
+        pushQuality(ev.detail.stars);
         liveSeen++;
         frameRate.tick();
         updateStats();
@@ -532,7 +766,12 @@ btnStart.addEventListener('click', async () => {
         if (seqRunning) _checkSeqProgress();
     });
 
+    stacker.setObjectSaturation(objSatOpts());
+    stacker.setDeconvDisplay(deconvDisplay());
+    deconvInfo = null;
+    showDeconvState();
     stacker.addEventListener('preview', () => {
+        showDeconvState();
         showTarget();
         placeholder.style.display = 'none';
         btnSavePng.disabled  = false;
@@ -609,6 +848,8 @@ btnStop.addEventListener('click', async () => {
 });
 
 btnReset.addEventListener('click', () => {
+    qualityHist.length = 0;
+    drawQuality();
     if (stacker) {
         stacker.reset();
     } else {
